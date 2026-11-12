@@ -1,0 +1,134 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-muted: var(--brand-muted);
+  --color-attention: var(--attention);
+  --color-attention-foreground: var(--attention-foreground);
+  --color-page: var(--page);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+}
+
+@layer base {
+  :root {
+    /* Square This Up palette */
+    --brand: #0504aa;
+    --brand-foreground: #ffffff;
+    --brand-muted: #ececff;
+    --attention: #e3ad36;
+    --attention-foreground: #1a1405;
+    --page: #f5f7fa;
+    --background: #f5f7fa;
+    --foreground: #0f172a;
+    --card: #ffffff;
+    --card-foreground: #0f172a;
+    --popover: #ffffff;
+    --popover-foreground: #0f172a;
+    --primary: #0504aa;
+    --primary-foreground: #ffffff;
+    --secondary: #eceff3;
+    --secondary-foreground: #0f172a;
+    --muted: #edeff3;
+    --muted-foreground: #5b6472;
+    --accent: #e3ad36;
+    --accent-foreground: #1a1405;
+    --destructive: #dc2626;
+    --border: rgb(15 23 42 / 12%);
+    --input: rgb(15 23 42 / 14%);
+    --ring: #0504aa;
+    --radius: 0.9rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-page text-foreground;
+    font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+    background-image:
+      radial-gradient(circle at 10% 0%, rgb(5 4 170 / 10%), transparent 34%),
+      radial-gradient(circle at 90% 4%, rgb(227 173 54 / 14%), transparent 28%),
+      linear-gradient(180deg, #f7f9fc 0%, #eef2f7 100%);
+    background-attachment: fixed;
+    min-height: 100dvh;
+  }
+
+  h1,
+  h2,
+  h3,
+  .font-display {
+    font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+  }
+}
+
+@layer utilities {
+  .bg-app {
+    background: transparent;
+  }
+  .bg-hero {
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 94%), rgb(236 236 255 / 88%)),
+      repeating-linear-gradient(
+        -18deg,
+        transparent,
+        transparent 10px,
+        rgb(5 4 170 / 3%) 10px,
+        rgb(5 4 170 / 3%) 11px
+      );
+  }
+  .text-brand {
+    color: var(--brand);
+  }
+  .bg-brand {
+    background-color: var(--brand);
+  }
+  .text-brand-foreground {
+    color: var(--brand-foreground);
+  }
+  .bg-brand-muted {
+    background-color: var(--brand-muted);
+  }
+  .border-brand {
+    border-color: var(--brand);
+  }
+  .text-attention {
+    color: var(--attention);
+  }
+  .bg-attention {
+    background-color: var(--attention);
+  }
+}
