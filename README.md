@@ -29,6 +29,13 @@ Open [http://127.0.0.1:3847](http://127.0.0.1:3847).
 
 Copy `.env.example` to `.env.local` to set your OpenAI key.
 
+## Deploy (Hostinger Git deploy)
+
+- Node.js **20.9 or newer** (Next.js 16 requirement). Pick it in hPanel.
+- Build command: `npm run build`. Start command: `npm start`.
+- `npm start` listens on the `PORT` Hostinger provides (3000 if none is set). Local development (`npm run dev`) still uses port 3847.
+- Set `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`) under the app's environment variables in hPanel.
+
 ## Checks
 
 ```bash
