@@ -1,7 +1,7 @@
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { CompanySettings, Customer, LineItem } from "./types";
-import { grandTotal, lineTotal, subtotal, taxAmount } from "./types";
+import { grandTotal, lineTotal, subtotal, taxAmount, unitPrice } from "./types";
 import { formatCurrency, formatDate } from "./utils";
 
 type DocKind = "Estimate" | "Invoice";
@@ -77,23 +77,23 @@ export function downloadDocumentPdf(opts: {
 
   autoTable(doc, {
     startY: y + 6,
-    head: [["Description", "Cat", "Qty", "Unit", "Rate", "Markup", "Total"]],
+    // Customer-facing: price per unit already includes markup; never show cost or markup.
+    head: [["Description", "Qty", "Unit", "Price", "Total"]],
     body: opts.lineItems.map((item) => [
       item.description || "—",
-      item.category,
       String(item.quantity),
       item.unit,
-      formatCurrency(item.unitCost),
-      `${item.markupPercent}%`,
+      formatCurrency(unitPrice(item)),
       formatCurrency(lineTotal(item)),
     ]),
-    styles: { fontSize: 8, cellPadding: 2.5 },
-    headStyles: { fillColor: [30, 41, 59], textColor: 255 },
+    styles: { fontSize: 9, cellPadding: 2.5 },
+    headStyles: { fillColor: [5, 4, 170], textColor: 255 },
     columnStyles: {
-      2: { halign: "right" },
-      4: { halign: "right" },
-      5: { halign: "right" },
-      6: { halign: "right" },
+      0: { cellWidth: "auto" },
+      1: { halign: "right", cellWidth: 16 },
+      2: { cellWidth: 16 },
+      3: { halign: "right", cellWidth: 26 },
+      4: { halign: "right", cellWidth: 28 },
     },
   });
 

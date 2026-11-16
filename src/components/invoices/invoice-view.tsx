@@ -14,8 +14,8 @@ import {
 } from "@/components/ui/select";
 import { useStore } from "@/lib/store";
 import type { Invoice, InvoiceStatus } from "@/lib/types";
-import { grandTotal, lineTotal, subtotal, taxAmount } from "@/lib/types";
-import { downloadDocumentPdf } from "@/lib/pdf";
+import { grandTotal, lineTotal, subtotal, taxAmount, unitPrice } from "@/lib/types";
+import { INVOICE_STATUS_LABELS, categoryLabel } from "@/lib/trades";
 import { formatCurrency, formatDate } from "@/lib/utils";
 
 export function InvoiceView({ invoice }: { invoice: Invoice }) {
@@ -34,7 +34,8 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
               type="button"
               variant="outline"
               className="h-11 rounded-xl"
-              onClick={() =>
+              onClick={async () => {
+                const { downloadDocumentPdf } = await import("@/lib/pdf");
                 downloadDocumentPdf({
                   kind: "Invoice",
                   number: invoice.number,
@@ -47,8 +48,8 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
                   notes: invoice.notes,
                   dateLabel: "Due",
                   dateValue: invoice.dueDate,
-                })
-              }
+                });
+              }}
             >
               <FileDown className="size-4" />
               PDF
@@ -80,13 +81,13 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
                 })
               }
             >
-              <SelectTrigger className="h-11 w-40 rounded-xl">
-                <SelectValue />
+              <SelectTrigger className="h-11 w-40 rounded-xl" aria-label="Invoice status">
+                <SelectValue>{(v: InvoiceStatus) => INVOICE_STATUS_LABELS[v] ?? v}</SelectValue>
               </SelectTrigger>
               <SelectContent>
-                {(["draft", "sent", "paid", "overdue"] as const).map((s) => (
+                {(Object.keys(INVOICE_STATUS_LABELS) as InvoiceStatus[]).map((s) => (
                   <SelectItem key={s} value={s}>
-                    {s}
+                    {INVOICE_STATUS_LABELS[s]}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -133,7 +134,7 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
                 <tr className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
                   <th className="py-2 pr-3 font-semibold">Description</th>
                   <th className="py-2 pr-3 font-semibold">Qty</th>
-                  <th className="py-2 pr-3 font-semibold">Rate</th>
+                  <th className="py-2 pr-3 font-semibold">Price</th>
                   <th className="py-2 text-right font-semibold">Total</th>
                 </tr>
               </thead>
@@ -142,13 +143,13 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
                   <tr key={item.id} className="border-b border-ink/5">
                     <td className="py-3 pr-3">
                       <p className="font-medium">{item.description}</p>
-                      <p className="text-xs capitalize text-muted-foreground">{item.category}</p>
+                      <p className="text-xs text-muted-foreground">{categoryLabel(item.category)}</p>
                     </td>
                     <td className="py-3 pr-3 tabular-nums">
                       {item.quantity} {item.unit}
                     </td>
                     <td className="py-3 pr-3 tabular-nums">
-                      {formatCurrency(item.unitCost)}
+                      {formatCurrency(unitPrice(item))}
                     </td>
                     <td className="py-3 text-right font-semibold tabular-nums">
                       {formatCurrency(lineTotal(item))}
@@ -176,7 +177,7 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
                 <dd>{formatCurrency(subtotal(invoice.lineItems))}</dd>
               </div>
               <div className="flex justify-between">
-                <dt>Tax</dt>
+                <dt>Tax ({invoice.taxPercent}%)</dt>
                 <dd>
                   {formatCurrency(taxAmount(invoice.lineItems, invoice.taxPercent))}
                 </dd>
@@ -188,6 +189,7 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
             variant="ghost"
             className="h-11 w-full rounded-xl text-rose-700 hover:bg-rose-50"
             onClick={() => {
+              if (!window.confirm(`Delete invoice ${invoice.number}? This can't be undone.`)) return;
               deleteInvoice(invoice.id);
               router.push("/invoices");
             }}

@@ -42,3 +42,4 @@ yarn-error.log*
 next-env.d.ts
 bid-bench.zip
 bid-builder.zip
+!.env.example

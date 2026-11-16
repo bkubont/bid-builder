@@ -13,13 +13,18 @@ export function InstallPrompt() {
   const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(
     null
   );
-  const [dismissed, setDismissed] = useState(false);
+  // Safe to read storage here: the banner only renders after a browser event,
+  // so server and first client render both show nothing.
+  const [dismissed, setDismissed] = useState(() => {
+    try {
+      return typeof window !== "undefined" &&
+        localStorage.getItem("bid-builder-install-dismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (localStorage.getItem("bid-builder-install-dismissed") === "1") {
-      setDismissed(true);
-    }
     const handler = (e: Event) => {
       e.preventDefault();
       setDeferred(e as BeforeInstallPromptEvent);
@@ -36,7 +41,7 @@ export function InstallPrompt() {
       <div className="min-w-0 flex-1">
         <p className="font-display text-base text-foreground">Install Bid Builder</p>
         <p className="text-sm text-muted-foreground">
-          Add it to your home screen for tablet and phone use offline-ready later.
+          Add it to your home screen so it opens full-screen like a regular app.
         </p>
         <div className="mt-2 flex flex-wrap gap-2">
           <Button

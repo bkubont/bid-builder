@@ -1,23 +1,25 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useStore } from "@/lib/store";
+import type { CompanySettings } from "@/lib/types";
 
 export default function SettingsPage() {
-  const { data, updateCompany, resetDemoData, ready } = useStore();
-  const [form, setForm] = useState(data.company);
-  const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    if (ready) setForm(data.company);
-  }, [ready, data.company]);
-
+  const { data, ready } = useStore();
   if (!ready) return <div className="animate-pulse p-8 text-muted-foreground">Loading…</div>;
+  return <SettingsForm company={data.company} />;
+}
+
+function SettingsForm({ company }: { company: CompanySettings }) {
+  const { updateCompany, resetDemoData } = useStore();
+  const [form, setForm] = useState(company);
+  const [saved, setSaved] = useState(false);
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -80,24 +82,18 @@ export default function SettingsPage() {
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
             <Label>Default markup %</Label>
-            <Input
-              type="number"
+            <NumberInput
               className="h-12 rounded-xl"
               value={form.defaultMarkup}
-              onChange={(e) =>
-                setForm({ ...form, defaultMarkup: Number(e.target.value) || 0 })
-              }
+              onValueChange={(defaultMarkup) => setForm({ ...form, defaultMarkup })}
             />
           </div>
           <div className="space-y-2">
             <Label>Default tax %</Label>
-            <Input
-              type="number"
+            <NumberInput
               className="h-12 rounded-xl"
               value={form.defaultTax}
-              onChange={(e) =>
-                setForm({ ...form, defaultTax: Number(e.target.value) || 0 })
-              }
+              onValueChange={(defaultTax) => setForm({ ...form, defaultTax })}
             />
           </div>
         </div>
@@ -121,10 +117,17 @@ export default function SettingsPage() {
             variant="outline"
             className="h-12 rounded-xl"
             onClick={() => {
-              if (confirm("Reset all local demo data?")) resetDemoData();
+              if (
+                window.confirm(
+                  "Replace everything on this device with fresh test data? Your current customers, estimates and invoices here will be erased."
+                )
+              ) {
+                resetDemoData();
+                window.location.reload();
+              }
             }}
           >
-            Reset demo data
+            Reset test data
           </Button>
         </div>
       </form>
