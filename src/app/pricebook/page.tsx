@@ -21,7 +21,8 @@ import {
 } from "@/components/ui/select";
 import { useStore } from "@/lib/store";
 import type { LineCategory, PricebookItem, Trade } from "@/lib/types";
-import { CATEGORIES, TRADES } from "@/lib/trades";
+import { CATEGORIES, TRADES, categoryLabel, tradeLabel } from "@/lib/trades";
+import { NumberInput } from "@/components/ui/number-input";
 import { formatCurrency } from "@/lib/utils";
 
 export default function PricebookPage() {
@@ -71,7 +72,7 @@ export default function PricebookPage() {
         />
         <Select value={tradeFilter} onValueChange={(v) => setTradeFilter(v || "all")}>
           <SelectTrigger className="h-12 rounded-xl sm:w-48">
-            <SelectValue placeholder="Trade" />
+            <SelectValue>{(v: string) => (v === "all" ? "All trades" : tradeLabel(v))}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All trades</SelectItem>
@@ -93,8 +94,8 @@ export default function PricebookPage() {
             >
               <div>
                 <p className="font-medium text-foreground">{item.name}</p>
-                <p className="text-sm capitalize text-muted-foreground">
-                  {item.category} · {item.trade} · /{item.unit}
+                <p className="text-sm text-muted-foreground">
+                  {categoryLabel(item.category)} · {tradeLabel(item.trade)} · per {item.unit}
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -117,7 +118,12 @@ export default function PricebookPage() {
                   variant="ghost"
                   size="icon"
                   className="size-10 text-rose-700"
-                  onClick={() => deletePricebookItem(item.id)}
+                  onClick={() => {
+                    if (window.confirm(`Delete "${item.name}" from the pricebook?`)) {
+                      deletePricebookItem(item.id);
+                    }
+                  }}
+                  aria-label={`Delete ${item.name}`}
                 >
                   <Trash2 className="size-4" />
                 </Button>
@@ -135,6 +141,7 @@ export default function PricebookPage() {
             </DialogTitle>
           </DialogHeader>
           <PricebookForm
+            key={editing?.id ?? "new"}
             item={editing}
             onSave={(values) => {
               upsertPricebookItem({ ...values, id: editing?.id });
@@ -187,8 +194,8 @@ function PricebookForm({
         <div className="space-y-2">
           <Label>Category</Label>
           <Select value={category} onValueChange={(v) => setCategory((v || "labor") as LineCategory)}>
-            <SelectTrigger className="h-12 rounded-xl">
-              <SelectValue />
+            <SelectTrigger className="h-12 rounded-xl" aria-label="Category">
+              <SelectValue>{(v: string) => categoryLabel(v)}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               {CATEGORIES.map((c) => (
@@ -202,8 +209,8 @@ function PricebookForm({
         <div className="space-y-2">
           <Label>Trade</Label>
           <Select value={trade} onValueChange={(v) => setTrade((v || "general") as Trade)}>
-            <SelectTrigger className="h-12 rounded-xl">
-              <SelectValue />
+            <SelectTrigger className="h-12 rounded-xl" aria-label="Trade">
+              <SelectValue>{(v: string) => tradeLabel(v)}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               {TRADES.map((t) => (
@@ -220,12 +227,7 @@ function PricebookForm({
         </div>
         <div className="space-y-2">
           <Label>Unit cost</Label>
-          <Input
-            type="number"
-            className="h-12 rounded-xl"
-            value={unitCost}
-            onChange={(e) => setUnitCost(Number(e.target.value) || 0)}
-          />
+          <NumberInput className="h-12 rounded-xl" value={unitCost} onValueChange={setUnitCost} />
         </div>
       </div>
       <div className="space-y-2">

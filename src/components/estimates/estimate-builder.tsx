@@ -2,18 +2,12 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  FileDown,
-  Plus,
-  Sparkles,
-  Trash2,
-  Copy,
-  Receipt,
-} from "lucide-react";
+import { Copy, FileDown, Plus, Receipt, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { NumberInput } from "@/components/ui/number-input";
 import {
   Select,
   SelectContent,
@@ -22,18 +16,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { newLineItem, useStore } from "@/lib/store";
-import type {
-  Estimate,
-  EstimateStatus,
-  LineCategory,
-  LineItem,
-  Trade,
-} from "@/lib/types";
-import { grandTotal, lineTotal, subtotal, taxAmount } from "@/lib/types";
-import { CATEGORIES, TRADES } from "@/lib/trades";
-import { formatCurrency } from "@/lib/utils";
-import { downloadDocumentPdf } from "@/lib/pdf";
+import type { Estimate, EstimateStatus, LineCategory, LineItem, Trade } from "@/lib/types";
+import { grandTotal, lineTotal, subtotal, taxAmount, unitPrice } from "@/lib/types";
+import {
+  CATEGORIES,
+  ESTIMATE_STATUS_LABELS,
+  TRADES,
+  categoryLabel,
+  tradeLabel,
+} from "@/lib/trades";
+import { dateOnlyFromToday, formatCurrency, toDateOnly } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
+
+type PendingDraft = { lineItems: LineItem[]; message: string };
+
+/** A line counts as "filled in" if it has a description or a price. */
+function hasContent(item: LineItem) {
+  return item.description.trim() !== "" || item.unitCost > 0;
+}
 
 export function EstimateBuilder({
   estimateId,
@@ -51,31 +51,28 @@ export function EstimateBuilder({
     convertEstimateToInvoice,
   } = useStore();
 
-  const existing = estimateId
-    ? data.estimates.find((e) => e.id === estimateId)
+  const existing = estimateId ? data.estimates.find((e) => e.id === estimateId) : undefined;
+  const invoice = existing
+    ? data.invoices.find((i) => i.estimateId === existing.id)
     : undefined;
 
   const seedCustomerId = existing?.customerId || initialCustomerId || "";
   const [customerId, setCustomerId] = useState(seedCustomerId);
   const [jobTitle, setJobTitle] = useState(existing?.jobTitle || "");
-  const [jobAddress, setJobAddress] = useState(() => {
-    if (existing?.jobAddress) return existing.jobAddress;
-    const fromSeed = seedCustomerId
-      ? data.customers.find((c) => c.id === seedCustomerId)
-      : undefined;
-    return fromSeed?.address || "";
-  });
+  const [jobAddress, setJobAddress] = useState(
+    () =>
+      existing?.jobAddress ||
+      data.customers.find((c) => c.id === seedCustomerId)?.address ||
+      ""
+  );
   const [trade, setTrade] = useState<Trade>(existing?.trade || "general");
   const [status, setStatus] = useState<EstimateStatus>(existing?.status || "draft");
-  const [taxPercent, setTaxPercent] = useState(
-    existing?.taxPercent ?? data.company.defaultTax
-  );
+  const [taxPercent, setTaxPercent] = useState(existing?.taxPercent ?? data.company.defaultTax);
   const [notes, setNotes] = useState(existing?.notes || "");
-  const [validUntil, setValidUntil] = useState(
-    existing?.validUntil?.slice(0, 10) ||
-      new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
+  const [validUntil, setValidUntil] = useState(() =>
+    existing?.validUntil ? toDateOnly(existing.validUntil) : dateOnlyFromToday(30)
   );
-  const [lineItems, setLineItems] = useState<LineItem[]>(
+  const [lineItems, setLineItems] = useState<LineItem[]>(() =>
     existing?.lineItems?.length
       ? existing.lineItems
       : [newLineItem({}, data.company.defaultMarkup)]
@@ -83,7 +80,9 @@ export function EstimateBuilder({
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
+  const [pendingDraft, setPendingDraft] = useState<PendingDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [pricebookFilter, setPricebookFilter] = useState("");
 
   const customer = data.customers.find((c) => c.id === customerId);
@@ -97,25 +96,31 @@ export function EstimateBuilder({
   );
 
   const filteredPricebook = data.pricebook.filter((item) => {
-    const q = pricebookFilter.toLowerCase();
+    const q = pricebookFilter.trim().toLowerCase();
     if (!q) return trade === "general" || item.trade === trade || item.trade === "general";
-    return (
-      item.name.toLowerCase().includes(q) ||
-      item.keywords.some((k) => k.includes(q))
-    );
+    return item.name.toLowerCase().includes(q) || item.keywords.some((k) => k.includes(q));
   });
 
+  // "Converted" is set by converting, not picked by hand.
+  const statusOptions = (Object.keys(ESTIMATE_STATUS_LABELS) as EstimateStatus[]).filter(
+    (s) => s !== "converted" || status === "converted"
+  );
+
+  function flash(message: string) {
+    setNotice(message);
+    window.setTimeout(() => setNotice((m) => (m === message ? null : m)), 2500);
+  }
+
   function updateLine(id: string, patch: Partial<LineItem>) {
-    setLineItems((prev) =>
-      prev.map((li) => (li.id === id ? { ...li, ...patch } : li))
-    );
+    setLineItems((prev) => prev.map((li) => (li.id === id ? { ...li, ...patch } : li)));
   }
 
   function addFromPricebook(id: string) {
     const item = data.pricebook.find((p) => p.id === id);
     if (!item) return;
     setLineItems((prev) => [
-      ...prev,
+      // Replace the starter blank line instead of leaving it behind.
+      ...prev.filter(hasContent),
       newLineItem(
         {
           pricebookItemId: item.id,
@@ -128,6 +133,15 @@ export function EstimateBuilder({
         data.company.defaultMarkup
       ),
     ]);
+    flash(`Added ${item.name}`);
+  }
+
+  function applyDraft(mode: "replace" | "append", draft: PendingDraft) {
+    setLineItems((prev) =>
+      mode === "replace" ? draft.lineItems : [...prev.filter(hasContent), ...draft.lineItems]
+    );
+    setAiMessage(draft.message);
+    setPendingDraft(null);
   }
 
   async function runAiDraft() {
@@ -137,6 +151,7 @@ export function EstimateBuilder({
     }
     setAiBusy(true);
     setAiMessage(null);
+    setPendingDraft(null);
     try {
       const res = await fetch("/api/ai-draft", {
         method: "POST",
@@ -150,13 +165,18 @@ export function EstimateBuilder({
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Draft failed");
-      setLineItems(json.lineItems);
-      if (!jobTitle) {
-        setJobTitle(aiPrompt.slice(0, 80));
+      if (!jobTitle.trim()) setJobTitle(aiPrompt.trim().split(/[.\n]/)[0].slice(0, 80));
+      const draft: PendingDraft = {
+        lineItems: json.lineItems,
+        message: `${json.summary}${json.source === "openai" ? " (AI)" : ""}`,
+      };
+      if (draft.lineItems.length === 0) {
+        setAiMessage(draft.message);
+      } else if (lineItems.some(hasContent)) {
+        setPendingDraft(draft); // ask before touching lines already entered
+      } else {
+        applyDraft("replace", draft);
       }
-      setAiMessage(
-        `${json.summary}${json.source === "mock" ? " (local draft)" : " (AI)"}`
-      );
     } catch (e) {
       setAiMessage(e instanceof Error ? e.message : "Draft failed");
     } finally {
@@ -164,9 +184,10 @@ export function EstimateBuilder({
     }
   }
 
-  function save(nextStatus?: EstimateStatus) {
+  /** Validate and save. Returns the saved estimate, or null if something is missing. */
+  function save(nextStatus?: EstimateStatus): Estimate | null {
     setError(null);
-    if (!customerId) {
+    if (!customerId || !customer) {
       setError("Pick a customer.");
       return null;
     }
@@ -176,57 +197,64 @@ export function EstimateBuilder({
     }
     const saved = upsertEstimate({
       id: existing?.id,
-      number: existing?.number,
       customerId,
       jobTitle: jobTitle.trim(),
-      jobAddress: jobAddress.trim() || customer?.address || "",
+      jobAddress: jobAddress.trim() || customer.address || "",
       trade,
       status: nextStatus || status,
-      lineItems,
+      lineItems: lineItems.filter(hasContent),
       taxPercent,
       notes,
-      validUntil: new Date(validUntil).toISOString(),
+      validUntil,
     });
     setStatus(saved.status);
     if (!existing) router.replace(`/estimates/${saved.id}`);
+    else flash("Saved");
     return saved;
   }
 
-  function handlePdf(saved?: Estimate | null) {
-    const est = saved || existing;
-    if (!est && !customerId) {
-      const result = save();
-      if (!result) return;
-      downloadDocumentPdf({
-        kind: "Estimate",
-        number: result.number,
-        company: data.company,
-        customer,
-        jobTitle: result.jobTitle,
-        jobAddress: result.jobAddress,
-        lineItems: result.lineItems,
-        taxPercent: result.taxPercent,
-        notes: result.notes,
-        dateLabel: "Valid until",
-        dateValue: result.validUntil,
-      });
-      return;
-    }
-    const result = save() || existing;
-    if (!result) return;
+  async function handlePdf() {
+    const saved = save();
+    if (!saved) return; // don't print an old version when the save failed
+    const { downloadDocumentPdf } = await import("@/lib/pdf");
     downloadDocumentPdf({
       kind: "Estimate",
-      number: result.number,
+      number: saved.number,
       company: data.company,
-      customer: data.customers.find((c) => c.id === result.customerId),
-      jobTitle: result.jobTitle,
-      jobAddress: result.jobAddress,
-      lineItems: result.lineItems,
-      taxPercent: result.taxPercent,
-      notes: result.notes,
+      customer,
+      jobTitle: saved.jobTitle,
+      jobAddress: saved.jobAddress,
+      lineItems: saved.lineItems,
+      taxPercent: saved.taxPercent,
+      notes: saved.notes,
       dateLabel: "Valid until",
-      dateValue: result.validUntil,
+      dateValue: saved.validUntil,
     });
+  }
+
+  function handleConvert() {
+    if (!existing) return;
+    if (invoice) {
+      router.push(`/invoices/${invoice.id}`);
+      return;
+    }
+    if (!save("accepted")) return;
+    const inv = convertEstimateToInvoice(existing.id);
+    if (inv) router.push(`/invoices/${inv.id}`);
+  }
+
+  function handleDuplicate() {
+    if (!existing || !save()) return;
+    const copy = duplicateEstimate(existing.id);
+    if (copy) router.push(`/estimates/${copy.id}`);
+  }
+
+  function handleDelete() {
+    if (!existing) return;
+    const extra = invoice ? ` Its invoice ${invoice.number} will be kept.` : "";
+    if (!window.confirm(`Delete ${existing.number} (${existing.jobTitle})? This can't be undone.${extra}`)) return;
+    deleteEstimate(existing.id);
+    router.push("/estimates");
   }
 
   return (
@@ -236,12 +264,7 @@ export function EstimateBuilder({
         description="Build materials + labor lines from your pricebook or draft from a job description."
         actions={
           <>
-            <Button
-              type="button"
-              variant="outline"
-              className="h-11 rounded-xl"
-              onClick={() => handlePdf()}
-            >
+            <Button type="button" variant="outline" className="h-11 rounded-xl" onClick={handlePdf}>
               <FileDown className="size-4" />
               PDF
             </Button>
@@ -257,7 +280,7 @@ export function EstimateBuilder({
       />
 
       {error ? (
-        <p className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-800">
+        <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-800">
           {error}
         </p>
       ) : null}
@@ -270,15 +293,22 @@ export function EstimateBuilder({
               <div className="space-y-2 sm:col-span-2">
                 <Label htmlFor="customer">Customer</Label>
                 <Select
-                  value={customerId || undefined}
+                  value={customerId || null}
                   onValueChange={(v) => {
-                    setCustomerId(v || "");
-                    const c = data.customers.find((x) => x.id === v);
+                    const id = (v as string | null) || "";
+                    setCustomerId(id);
+                    const c = data.customers.find((x) => x.id === id);
                     if (c && !jobAddress) setJobAddress(c.address);
                   }}
                 >
                   <SelectTrigger id="customer" className="h-12 rounded-xl">
-                    <SelectValue placeholder="Select customer" />
+                    <SelectValue>
+                      {(v: string | null) =>
+                        data.customers.find((c) => c.id === v)?.name ?? (
+                          <span className="text-muted-foreground">Select customer</span>
+                        )
+                      }
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     {data.customers.map((c) => (
@@ -310,10 +340,10 @@ export function EstimateBuilder({
                 />
               </div>
               <div className="space-y-2">
-                <Label>Trade</Label>
+                <Label htmlFor="trade">Trade</Label>
                 <Select value={trade} onValueChange={(v) => setTrade((v || "general") as Trade)}>
-                  <SelectTrigger className="h-12 rounded-xl">
-                    <SelectValue />
+                  <SelectTrigger id="trade" className="h-12 rounded-xl">
+                    <SelectValue>{(v: string) => tradeLabel(v)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     {TRADES.map((t) => (
@@ -325,33 +355,32 @@ export function EstimateBuilder({
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label>Status</Label>
+                <Label htmlFor="status">Status</Label>
                 <Select
                   value={status}
                   onValueChange={(v) => setStatus((v || "draft") as EstimateStatus)}
                 >
-                  <SelectTrigger className="h-12 rounded-xl">
-                    <SelectValue />
+                  <SelectTrigger id="status" className="h-12 rounded-xl">
+                    <SelectValue>
+                      {(v: EstimateStatus) => ESTIMATE_STATUS_LABELS[v] ?? v}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
-                    {(["draft", "sent", "accepted", "declined", "converted"] as const).map(
-                      (s) => (
-                        <SelectItem key={s} value={s}>
-                          {s}
-                        </SelectItem>
-                      )
-                    )}
+                    {statusOptions.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {ESTIMATE_STATUS_LABELS[s]}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="tax">Tax %</Label>
-                <Input
+                <NumberInput
                   id="tax"
-                  type="number"
                   className="h-12 rounded-xl"
                   value={taxPercent}
-                  onChange={(e) => setTaxPercent(Number(e.target.value) || 0)}
+                  onValueChange={setTaxPercent}
                 />
               </div>
               <div className="space-y-2">
@@ -401,23 +430,52 @@ export function EstimateBuilder({
               onChange={(e) => setAiPrompt(e.target.value)}
               placeholder="Example: Replace kitchen faucet, add disposal, ~3 hours plumbing, haul old fixtures."
             />
-            {aiMessage ? (
-              <p className="mt-2 text-sm text-muted-foreground">{aiMessage}</p>
+            {pendingDraft ? (
+              <div className="mt-3 rounded-2xl border border-brand/30 bg-brand-muted p-3">
+                <p className="text-sm text-foreground">
+                  Draft ready: {pendingDraft.lineItems.length} line
+                  {pendingDraft.lineItems.length === 1 ? "" : "s"}. You already have lines on this
+                  estimate — what should we do?
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    className="h-10 rounded-xl bg-brand text-brand-foreground hover:bg-brand/90"
+                    onClick={() => applyDraft("append", pendingDraft)}
+                  >
+                    Add to my lines
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-10 rounded-xl"
+                    onClick={() => applyDraft("replace", pendingDraft)}
+                  >
+                    Replace my lines
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="h-10 rounded-xl"
+                    onClick={() => setPendingDraft(null)}
+                  >
+                    Discard draft
+                  </Button>
+                </div>
+              </div>
             ) : null}
+            {aiMessage ? <p className="mt-2 text-sm text-muted-foreground">{aiMessage}</p> : null}
           </section>
 
           <section className="rounded-3xl border border-border bg-white/70 p-4 sm:p-5">
-            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mb-3 flex items-center justify-between gap-2">
               <h2 className="font-display text-lg text-foreground">Line items</h2>
               <Button
                 type="button"
                 variant="outline"
                 className="h-11 rounded-xl"
                 onClick={() =>
-                  setLineItems((prev) => [
-                    ...prev,
-                    newLineItem({}, data.company.defaultMarkup),
-                  ])
+                  setLineItems((prev) => [...prev, newLineItem({}, data.company.defaultMarkup)])
                 }
               >
                 <Plus className="size-4" />
@@ -425,114 +483,37 @@ export function EstimateBuilder({
               </Button>
             </div>
 
-            <div className="space-y-3">
-              {lineItems.map((item) => (
-                <div
-                  key={item.id}
-                  className="grid gap-2 rounded-2xl border border-border bg-muted/60 p-3 sm:grid-cols-[1.4fr_7rem_5rem_6rem_5rem_6rem_auto]"
-                >
-                  <Input
-                    className="h-11 rounded-xl sm:col-span-1"
-                    value={item.description}
-                    onChange={(e) =>
-                      updateLine(item.id, { description: e.target.value })
-                    }
-                    placeholder="Description"
+            {lineItems.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+                No lines yet. Add one, pick from the pricebook, or draft from a description.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {lineItems.map((item, index) => (
+                  <LineItemCard
+                    key={item.id}
+                    item={item}
+                    index={index}
+                    onChange={(patch) => updateLine(item.id, patch)}
+                    onRemove={() => setLineItems((prev) => prev.filter((x) => x.id !== item.id))}
                   />
-                  <Select
-                    value={item.category}
-                    onValueChange={(v) =>
-                      updateLine(item.id, {
-                        category: (v || "labor") as LineCategory,
-                      })
-                    }
-                  >
-                    <SelectTrigger className="h-11 rounded-xl">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {CATEGORIES.map((c) => (
-                        <SelectItem key={c.value} value={c.value}>
-                          {c.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Input
-                    type="number"
-                    className="h-11 rounded-xl"
-                    value={item.quantity}
-                    onChange={(e) =>
-                      updateLine(item.id, {
-                        quantity: Number(e.target.value) || 0,
-                      })
-                    }
-                    aria-label="Quantity"
-                  />
-                  <Input
-                    className="h-11 rounded-xl"
-                    value={item.unit}
-                    onChange={(e) => updateLine(item.id, { unit: e.target.value })}
-                    aria-label="Unit"
-                  />
-                  <Input
-                    type="number"
-                    className="h-11 rounded-xl"
-                    value={item.unitCost}
-                    onChange={(e) =>
-                      updateLine(item.id, {
-                        unitCost: Number(e.target.value) || 0,
-                      })
-                    }
-                    aria-label="Unit cost"
-                  />
-                  <Input
-                    type="number"
-                    className="h-11 rounded-xl"
-                    value={item.markupPercent}
-                    onChange={(e) =>
-                      updateLine(item.id, {
-                        markupPercent: Number(e.target.value) || 0,
-                      })
-                    }
-                    aria-label="Markup %"
-                  />
-                  <div className="flex items-center justify-between gap-2 sm:flex-col sm:items-end">
-                    <span className="text-sm font-semibold tabular-nums">
-                      {formatCurrency(lineTotal(item))}
-                    </span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="size-10 text-rose-700"
-                      onClick={() =>
-                        setLineItems((prev) => prev.filter((x) => x.id !== item.id))
-                      }
-                      aria-label="Remove line"
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </section>
         </div>
 
         <aside className="space-y-5 xl:sticky xl:top-6 xl:self-start">
           <section className="rounded-3xl border border-border bg-brand p-5 text-brand-foreground">
             <p className="text-sm text-white/60">Estimate total</p>
-            <p className="font-display text-4xl tracking-tight">
-              {formatCurrency(totals.grand)}
-            </p>
+            <p className="font-display text-4xl tracking-tight">{formatCurrency(totals.grand)}</p>
             <dl className="mt-4 space-y-2 text-sm text-white/75">
               <div className="flex justify-between">
                 <dt>Subtotal</dt>
                 <dd className="tabular-nums">{formatCurrency(totals.sub)}</dd>
               </div>
               <div className="flex justify-between">
-                <dt>Tax</dt>
+                <dt>Tax ({taxPercent}%)</dt>
                 <dd className="tabular-nums">{formatCurrency(totals.tax)}</dd>
               </div>
             </dl>
@@ -542,36 +523,24 @@ export function EstimateBuilder({
                   type="button"
                   variant="outline"
                   className="h-11 rounded-xl border-white/20 bg-transparent text-brand-foreground hover:bg-white/10"
-                  onClick={() => {
-                    const copy = duplicateEstimate(existing.id);
-                    if (copy) router.push(`/estimates/${copy.id}`);
-                  }}
+                  onClick={handleDuplicate}
                 >
                   <Copy className="size-4" />
                   Duplicate
                 </Button>
-                {existing.status !== "converted" ? (
-                  <Button
-                    type="button"
-                    className="h-11 rounded-xl bg-attention text-foreground hover:bg-attention/90"
-                    onClick={() => {
-                      save("accepted");
-                      const inv = convertEstimateToInvoice(existing.id);
-                      if (inv) router.push(`/invoices/${inv.id}`);
-                    }}
-                  >
-                    <Receipt className="size-4" />
-                    Convert to invoice
-                  </Button>
-                ) : null}
+                <Button
+                  type="button"
+                  className="h-11 rounded-xl bg-attention text-foreground hover:bg-attention/90"
+                  onClick={handleConvert}
+                >
+                  <Receipt className="size-4" />
+                  {invoice ? `View invoice ${invoice.number}` : "Convert to invoice"}
+                </Button>
                 <Button
                   type="button"
                   variant="ghost"
                   className="h-11 rounded-xl text-rose-200 hover:bg-white/10 hover:text-rose-100"
-                  onClick={() => {
-                    deleteEstimate(existing.id);
-                    router.push("/estimates");
-                  }}
+                  onClick={handleDelete}
                 >
                   Delete estimate
                 </Button>
@@ -581,6 +550,7 @@ export function EstimateBuilder({
 
           <section className="rounded-3xl border border-border bg-white/70 p-4">
             <h2 className="font-display text-lg text-foreground">Pricebook</h2>
+            <p className="text-xs text-muted-foreground">Tap an item to add it as a line.</p>
             <Input
               className="mt-3 h-11 rounded-xl"
               placeholder="Search items…"
@@ -599,11 +569,9 @@ export function EstimateBuilder({
                     className="flex w-full items-start justify-between gap-3 rounded-2xl border border-border bg-muted/50 px-3 py-3 text-left transition hover:border-brand hover:bg-brand-muted"
                   >
                     <span>
-                      <span className="block text-sm font-medium text-foreground">
-                        {item.name}
-                      </span>
-                      <span className="text-xs capitalize text-muted-foreground">
-                        {item.category} · {item.trade} · {item.unit}
+                      <span className="block text-sm font-medium text-foreground">{item.name}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {categoryLabel(item.category)} · {tradeLabel(item.trade)} · {item.unit}
                       </span>
                     </span>
                     <span className="shrink-0 text-sm font-semibold tabular-nums">
@@ -615,6 +583,139 @@ export function EstimateBuilder({
             </div>
           </section>
         </aside>
+      </div>
+
+      {/* Total + Save stay in reach while scrolling on phones and tablets. */}
+      <div className="sticky bottom-[calc(env(safe-area-inset-bottom)+5rem)] z-20 flex items-center justify-between gap-3 rounded-2xl bg-brand px-4 py-3 text-brand-foreground shadow-lg lg:bottom-4 xl:hidden">
+        <div>
+          <p className="text-xs text-white/60">Total</p>
+          <p className="font-display text-xl tabular-nums">{formatCurrency(totals.grand)}</p>
+        </div>
+        <Button
+          type="button"
+          className="h-11 rounded-xl bg-attention px-6 text-foreground hover:bg-attention/90"
+          onClick={() => save()}
+        >
+          Save
+        </Button>
+      </div>
+
+      {notice ? (
+        <div
+          role="status"
+          className="fixed left-1/2 top-4 z-50 -translate-x-1/2 rounded-xl bg-foreground px-4 py-2 text-sm text-background shadow-lg"
+        >
+          {notice}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Field({
+  label,
+  className,
+  children,
+}: {
+  label: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className={`block min-w-0 space-y-1 ${className ?? ""}`}>
+      <span className="block text-xs font-medium text-muted-foreground">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function LineItemCard({
+  item,
+  index,
+  onChange,
+  onRemove,
+}: {
+  item: LineItem;
+  index: number;
+  onChange: (patch: Partial<LineItem>) => void;
+  onRemove: () => void;
+}) {
+  const price = unitPrice(item);
+  return (
+    <div className="@container rounded-2xl border border-border bg-muted/60 p-3">
+      <div className="flex items-end gap-2">
+        <Field label={`Line ${index + 1}`} className="flex-1">
+          <Input
+            className="h-11 rounded-xl bg-white"
+            value={item.description}
+            onChange={(e) => onChange({ description: e.target.value })}
+            placeholder="Description"
+          />
+        </Field>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-11 shrink-0 text-rose-700"
+          onClick={onRemove}
+          aria-label={`Remove line ${index + 1}`}
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2 @md:grid-cols-3 @3xl:grid-cols-[8rem_repeat(4,minmax(0,1fr))_minmax(8rem,auto)]">
+        <Field label="Category">
+          <Select
+            value={item.category}
+            onValueChange={(v) => onChange({ category: (v || "labor") as LineCategory })}
+          >
+            <SelectTrigger className="h-11 w-full rounded-xl bg-white" aria-label="Category">
+              <SelectValue>{(v: string) => categoryLabel(v)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {CATEGORIES.map((c) => (
+                <SelectItem key={c.value} value={c.value}>
+                  {c.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Qty">
+          <NumberInput
+            className="h-11 rounded-xl bg-white"
+            value={item.quantity}
+            onValueChange={(quantity) => onChange({ quantity })}
+          />
+        </Field>
+        <Field label="Unit">
+          <Input
+            className="h-11 rounded-xl bg-white"
+            value={item.unit}
+            onChange={(e) => onChange({ unit: e.target.value })}
+            placeholder="ea, hr, ft…"
+          />
+        </Field>
+        <Field label="Your cost / unit">
+          <NumberInput
+            className="h-11 rounded-xl bg-white"
+            value={item.unitCost}
+            onValueChange={(unitCost) => onChange({ unitCost })}
+          />
+        </Field>
+        <Field label="Markup %">
+          <NumberInput
+            className="h-11 rounded-xl bg-white"
+            value={item.markupPercent}
+            onValueChange={(markupPercent) => onChange({ markupPercent })}
+          />
+        </Field>
+        <div className="flex min-w-0 flex-col justify-end rounded-xl bg-white/80 px-3 py-1.5 text-right">
+          <span className="text-xs text-muted-foreground">
+            {formatCurrency(price)} / {item.unit || "unit"}
+          </span>
+          <span className="font-semibold tabular-nums">{formatCurrency(lineTotal(item))}</span>
+        </div>
       </div>
     </div>
   );

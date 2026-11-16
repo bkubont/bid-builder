@@ -49,7 +49,10 @@ export default function CustomersPage() {
           action={
             <Button
               className="h-11 rounded-xl bg-attention text-foreground hover:bg-attention/90"
-              onClick={() => setOpen(true)}
+              onClick={() => {
+                setEditing(undefined);
+                setOpen(true);
+              }}
             >
               Add first customer
             </Button>
@@ -72,7 +75,15 @@ export default function CustomersPage() {
                   variant="ghost"
                   size="icon"
                   className="size-10 text-rose-700"
-                  onClick={() => deleteCustomer(customer.id)}
+                  onClick={() => {
+                    const jobs =
+                      data.estimates.filter((e) => e.customerId === customer.id).length +
+                      data.invoices.filter((i) => i.customerId === customer.id).length;
+                    const warning = jobs
+                      ? ` They're on ${jobs} estimate${jobs === 1 ? "" : "s"}/invoice${jobs === 1 ? "" : "s"}, which will show "No customer".`
+                      : "";
+                    if (window.confirm(`Delete ${customer.name}?${warning}`)) deleteCustomer(customer.id);
+                  }}
                   aria-label="Delete customer"
                 >
                   <Trash2 className="size-4" />
@@ -115,6 +126,7 @@ export default function CustomersPage() {
             </DialogTitle>
           </DialogHeader>
           <CustomerForm
+            key={editing?.id ?? "new"}
             customer={editing}
             onDone={() => setOpen(false)}
           />

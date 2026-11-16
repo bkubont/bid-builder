@@ -61,6 +61,7 @@ export interface LineItem {
   markupPercent: number;
 }
 
+/** validUntil / dueDate are local calendar dates: "YYYY-MM-DD". */
 export interface Estimate {
   id: string;
   number: string;
@@ -116,19 +117,37 @@ export interface AppData {
   };
 }
 
+/** Round to whole cents so every displayed number adds up exactly. */
+export function roundCents(amount: number): number {
+  return Math.round((amount + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * Price per unit the customer pays (cost + markup), rounded to cents.
+ * Customer-facing documents show this instead of cost and markup.
+ */
+export function unitPrice(item: LineItem): number {
+  return roundCents((Number(item.unitCost) || 0) * (1 + (Number(item.markupPercent) || 0) / 100));
+}
+
+/** Line total = quantity x customer unit price, so "qty x price = total" always checks out. */
 export function lineTotal(item: LineItem): number {
-  const base = item.quantity * item.unitCost;
-  return base * (1 + (item.markupPercent || 0) / 100);
+  return roundCents((Number(item.quantity) || 0) * unitPrice(item));
+}
+
+/** What the line costs you before markup. */
+export function lineCost(item: LineItem): number {
+  return roundCents((Number(item.quantity) || 0) * (Number(item.unitCost) || 0));
 }
 
 export function subtotal(items: LineItem[]): number {
-  return items.reduce((sum, item) => sum + lineTotal(item), 0);
+  return roundCents(items.reduce((sum, item) => sum + lineTotal(item), 0));
 }
 
 export function taxAmount(items: LineItem[], taxPercent: number): number {
-  return subtotal(items) * ((taxPercent || 0) / 100);
+  return roundCents(subtotal(items) * ((Number(taxPercent) || 0) / 100));
 }
 
 export function grandTotal(items: LineItem[], taxPercent: number): number {
-  return subtotal(items) + taxAmount(items, taxPercent);
+  return roundCents(subtotal(items) + taxAmount(items, taxPercent));
 }

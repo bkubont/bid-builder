@@ -479,7 +479,7 @@ function ScheduledBlock({
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
-            onDelete(block.id);
+            if (window.confirm(`Remove "${block.title}" from the schedule?`)) onDelete(block.id);
           }}
           aria-label="Remove block"
         >
