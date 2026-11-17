@@ -15,7 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { newLineItem, useStore } from "@/lib/store";
+import { newLineItem, useSafe, useStore } from "@/lib/store";
 import type { Estimate, EstimateStatus, LineCategory, LineItem, Trade } from "@/lib/types";
 import { grandTotal, lineTotal, subtotal, taxAmount, unitPrice } from "@/lib/types";
 import {
@@ -84,6 +84,8 @@ export function EstimateBuilder({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pricebookFilter, setPricebookFilter] = useState("");
+  const [busy, setBusy] = useState(false);
+  const safe = useSafe();
 
   const customer = data.customers.find((c) => c.id === customerId);
   const totals = useMemo(
@@ -184,8 +186,8 @@ export function EstimateBuilder({
     }
   }
 
-  /** Validate and save. Returns the saved estimate, or null if something is missing. */
-  function save(nextStatus?: EstimateStatus): Estimate | null {
+  /** Validate and save. Returns the saved estimate, or null if it didn't save. */
+  async function save(nextStatus?: EstimateStatus): Promise<Estimate | null> {
     setError(null);
     if (!customerId || !customer) {
       setError("Pick a customer.");
@@ -195,7 +197,9 @@ export function EstimateBuilder({
       setError("Add a job title.");
       return null;
     }
-    const saved = upsertEstimate({
+    setBusy(true);
+    const saved = await safe(() =>
+      upsertEstimate({
       id: existing?.id,
       customerId,
       jobTitle: jobTitle.trim(),
@@ -206,7 +210,10 @@ export function EstimateBuilder({
       taxPercent,
       notes,
       validUntil,
-    });
+      })
+    );
+    setBusy(false);
+    if (!saved) return null;
     setStatus(saved.status);
     if (!existing) router.replace(`/estimates/${saved.id}`);
     else flash("Saved");
@@ -214,7 +221,7 @@ export function EstimateBuilder({
   }
 
   async function handlePdf() {
-    const saved = save();
+    const saved = await save();
     if (!saved) return; // don't print an old version when the save failed
     const { downloadDocumentPdf } = await import("@/lib/pdf");
     downloadDocumentPdf({
@@ -232,29 +239,35 @@ export function EstimateBuilder({
     });
   }
 
-  function handleConvert() {
+  async function handleConvert() {
     if (!existing) return;
     if (invoice) {
       router.push(`/invoices/${invoice.id}`);
       return;
     }
-    if (!save("accepted")) return;
-    const inv = convertEstimateToInvoice(existing.id);
+    if (!(await save("accepted"))) return;
+    setBusy(true);
+    const inv = await safe(() => convertEstimateToInvoice(existing.id));
+    setBusy(false);
     if (inv) router.push(`/invoices/${inv.id}`);
   }
 
-  function handleDuplicate() {
-    if (!existing || !save()) return;
-    const copy = duplicateEstimate(existing.id);
+  async function handleDuplicate() {
+    if (!existing || !(await save())) return;
+    setBusy(true);
+    const copy = await safe(() => duplicateEstimate(existing.id), "Copy created");
+    setBusy(false);
     if (copy) router.push(`/estimates/${copy.id}`);
   }
 
-  function handleDelete() {
+  async function handleDelete() {
     if (!existing) return;
     const extra = invoice ? ` Its invoice ${invoice.number} will be kept.` : "";
     if (!window.confirm(`Delete ${existing.number} (${existing.jobTitle})? This can't be undone.${extra}`)) return;
-    deleteEstimate(existing.id);
-    router.push("/estimates");
+    setBusy(true);
+    const ok = await safe(() => deleteEstimate(existing.id), "Estimate deleted");
+    setBusy(false);
+    if (ok) router.push("/estimates");
   }
 
   return (
@@ -264,16 +277,17 @@ export function EstimateBuilder({
         description="Build materials + labor lines from your pricebook or draft from a job description."
         actions={
           <>
-            <Button type="button" variant="outline" className="h-11 rounded-xl" onClick={handlePdf}>
+            <Button type="button" variant="outline" className="h-11 rounded-xl" disabled={busy} onClick={handlePdf}>
               <FileDown className="size-4" />
               PDF
             </Button>
             <Button
               type="button"
               className="h-11 rounded-xl bg-attention text-foreground hover:bg-attention/90"
+              disabled={busy}
               onClick={() => save()}
             >
-              Save
+              {busy ? "Saving…" : "Save"}
             </Button>
           </>
         }
@@ -523,6 +537,7 @@ export function EstimateBuilder({
                   type="button"
                   variant="outline"
                   className="h-11 rounded-xl border-white/20 bg-transparent text-brand-foreground hover:bg-white/10"
+                  disabled={busy}
                   onClick={handleDuplicate}
                 >
                   <Copy className="size-4" />
@@ -531,6 +546,7 @@ export function EstimateBuilder({
                 <Button
                   type="button"
                   className="h-11 rounded-xl bg-attention text-foreground hover:bg-attention/90"
+                  disabled={busy}
                   onClick={handleConvert}
                 >
                   <Receipt className="size-4" />
@@ -540,6 +556,7 @@ export function EstimateBuilder({
                   type="button"
                   variant="ghost"
                   className="h-11 rounded-xl text-rose-200 hover:bg-white/10 hover:text-rose-100"
+                  disabled={busy}
                   onClick={handleDelete}
                 >
                   Delete estimate
@@ -594,9 +611,10 @@ export function EstimateBuilder({
         <Button
           type="button"
           className="h-11 rounded-xl bg-attention px-6 text-foreground hover:bg-attention/90"
+          disabled={busy}
           onClick={() => save()}
         >
-          Save
+          {busy ? "Saving…" : "Save"}
         </Button>
       </div>
 

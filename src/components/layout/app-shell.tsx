@@ -18,6 +18,8 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ButtonLink } from "@/components/ui/button-link";
 import { InstallPrompt } from "@/components/layout/install-prompt";
+import { SignOutButton } from "@/components/auth/sign-out-button";
+import { OFFLINE_MESSAGE, useStore } from "@/lib/store";
 
 const NAV = [
   { href: "/", label: "Home", icon: LayoutDashboard },
@@ -32,6 +34,7 @@ const NAV = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const { me, online, toasts } = useStore();
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
@@ -61,9 +64,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
-          <p className="px-3 text-xs text-white/45">
-            Square This Up · tablet-first
-          </p>
+          <div className="border-t border-white/10 px-3 pt-3">
+            <p className="truncate text-sm font-semibold text-white">{me.companyName}</p>
+            <p className="truncate text-xs text-white/60">{me.name}</p>
+            <SignOutButton className="-mx-3 mt-1 text-white/70 hover:bg-white/10 hover:text-white" />
+          </div>
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">
@@ -131,14 +136,39 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     );
                   })}
                 </nav>
+                <div className="mt-auto border-t border-white/10 pt-3">
+                  <p className="truncate px-3 text-sm font-semibold">{me.companyName}</p>
+                  <p className="truncate px-3 text-xs text-white/60">{me.name}</p>
+                  <SignOutButton className="mt-1 w-full text-white/80 hover:bg-white/10" />
+                </div>
               </div>
             </div>
           )}
 
           <main className="flex-1 px-4 pb-28 pt-4 sm:px-6 sm:pt-6 lg:px-8 lg:pb-10">
+            {!online ? (
+              <p role="status" className="mb-4 rounded-2xl bg-slate-800 px-4 py-3 text-sm text-white">
+                {OFFLINE_MESSAGE}
+              </p>
+            ) : null}
             <InstallPrompt />
             {children}
           </main>
+
+          <div aria-live="polite" className="pointer-events-none fixed inset-x-0 top-3 z-[60] flex flex-col items-center gap-2 px-4">
+            {toasts.map((t) => (
+              <div
+                key={t.id}
+                role={t.tone === "error" ? "alert" : "status"}
+                className={cn(
+                  "pointer-events-auto max-w-md rounded-xl px-4 py-2.5 text-sm shadow-lg",
+                  t.tone === "error" ? "bg-rose-700 text-white" : "bg-foreground text-background"
+                )}
+              >
+                {t.message}
+              </div>
+            ))}
+          </div>
 
           <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-card/95 px-1 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur lg:hidden">
             <div className="mx-auto grid max-w-lg grid-cols-5 gap-1">

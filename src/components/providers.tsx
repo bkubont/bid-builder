@@ -1,6 +1,5 @@
 "use client";
 
-import { StoreProvider } from "@/lib/store";
 import { useEffect } from "react";
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -19,5 +18,5 @@ export function Providers({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  return <StoreProvider>{children}</StoreProvider>;
+  return <>{children}</>;
 }

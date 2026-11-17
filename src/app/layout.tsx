@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import { Archivo, Figtree } from "next/font/google";
-import { AppShell } from "@/components/layout/app-shell";
 import { Providers } from "@/components/providers";
 import "./globals.css";
 
@@ -50,9 +49,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${figtree.variable} ${archivo.variable} antialiased`}>
-        <Providers>
-          <AppShell>{children}</AppShell>
-        </Providers>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { useStore } from "@/lib/store";
+import { useSafe, useStore } from "@/lib/store";
 import type { Customer } from "@/lib/types";
 
 export function CustomerForm({
@@ -16,6 +16,8 @@ export function CustomerForm({
   onDone?: (customer: Customer) => void;
 }) {
   const { upsertCustomer } = useStore();
+  const safe = useSafe();
+  const [busy, setBusy] = useState(false);
   const [name, setName] = useState(customer?.name || "");
   const [email, setEmail] = useState(customer?.email || "");
   const [phone, setPhone] = useState(customer?.phone || "");
@@ -26,21 +28,23 @@ export function CustomerForm({
   return (
     <form
       className="space-y-4"
-      onSubmit={(e) => {
+      onSubmit={async (e) => {
         e.preventDefault();
         if (!name.trim()) {
           setError("Name is required.");
           return;
         }
-        const saved = upsertCustomer({
+        setBusy(true);
+        const saved = await safe(() => upsertCustomer({
           id: customer?.id,
           name: name.trim(),
           email: email.trim(),
           phone: phone.trim(),
           address: address.trim(),
           notes: notes.trim(),
-        });
-        onDone?.(saved);
+        }), customer ? "Customer saved" : "Customer added");
+        setBusy(false);
+        if (saved) onDone?.(saved);
       }}
     >
       {error ? <p className="text-sm text-rose-700">{error}</p> : null}
@@ -95,9 +99,10 @@ export function CustomerForm({
       </div>
       <Button
         type="submit"
+        disabled={busy}
         className="h-12 w-full rounded-xl bg-attention text-foreground hover:bg-attention/90 sm:w-auto"
       >
-        {customer ? "Save customer" : "Add customer"}
+        {busy ? "Saving…" : customer ? "Save customer" : "Add customer"}
       </Button>
     </form>
   );
