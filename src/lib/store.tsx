@@ -43,7 +43,8 @@ export const OFFLINE_MESSAGE = "You're offline. You can look around, but changes
 
 type Toast = { id: number; message: string; tone: "info" | "error" };
 
-type EstimateInput = Omit<Estimate, "id" | "number" | "createdAt" | "updatedAt"> & { id?: string };
+/** The tax rule is set by the server when an estimate is created, so it isn't sent. */
+type EstimateInput = Omit<Estimate, "id" | "number" | "createdAt" | "updatedAt" | "taxableCategories"> & { id?: string };
 
 function readCache(userId: string): { savedAt: number; data: AppData } | null {
   try {
@@ -105,7 +106,7 @@ function upsertById<T extends { id: string }>(list: T[], item: T, atStart = fals
   return atStart ? [item, ...list] : [...list, item];
 }
 
-function useStoreValue(initialData: AppData, loadedAt: number, me: MeInfo) {
+function useStoreValue(initialData: AppData, loadedAt: number, me: MeInfo, emailEnabled: boolean) {
   const [data, setData] = useState<AppData>(() => {
     // If the server copy came from the offline page cache, a newer copy saved
     // on this device wins.
@@ -244,6 +245,36 @@ function useStoreValue(initialData: AppData, loadedAt: number, me: MeInfo) {
         return invoice;
       },
 
+      async requestDeposit(estimateId: string, percent: number): Promise<Invoice> {
+        const { invoice, estimate } = await mutate(() => actions.requestDepositAction(estimateId, percent));
+        setData((d) => ({
+          ...d,
+          estimates: upsertById(d.estimates, estimate),
+          invoices: upsertById(d.invoices, invoice, true),
+        }));
+        return invoice;
+      },
+
+      /** Email a document; drafts become "sent". */
+      async sendDocument(input: {
+        documentType: "estimate" | "invoice";
+        documentId: string;
+        to: string;
+        subject: string;
+        message: string;
+        pdfBase64: string;
+      }) {
+        await mutate(() => actions.sendDocumentAction(input));
+        const sent = <T extends { id: string; status: string }>(list: T[]) =>
+          list.map((x) => (x.id === input.documentId && x.status === "draft" ? { ...x, status: "sent" } : x));
+        setData((d) =>
+          input.documentType === "estimate"
+            ? { ...d, estimates: sent(d.estimates) }
+            : { ...d, invoices: sent(d.invoices) }
+        );
+        return true as const;
+      },
+
       async updateInvoice(input: { id: string; status: InvoiceStatus; dueDate?: string; notes?: string }) {
         const saved = await mutate(() => actions.updateInvoiceAction(input));
         setData((d) => ({ ...d, invoices: upsertById(d.invoices, saved) }));
@@ -308,7 +339,7 @@ function useStoreValue(initialData: AppData, loadedAt: number, me: MeInfo) {
     [mutate]
   );
 
-  return { ready: true as const, data, me, online, refresh, notify, toasts, ...api };
+  return { ready: true as const, data, me, online, refresh, notify, toasts, emailEnabled, ...api };
 }
 
 type StoreValue = ReturnType<typeof useStoreValue>;
@@ -318,14 +349,17 @@ export function StoreProvider({
   initialData,
   loadedAt,
   me,
+  emailEnabled,
   children,
 }: {
   initialData: AppData;
   loadedAt: number;
   me: MeInfo;
+  /** Whether the server can send email (RESEND_API_KEY + EMAIL_FROM). */
+  emailEnabled: boolean;
   children: ReactNode;
 }) {
-  const value = useStoreValue(initialData, loadedAt, me);
+  const value = useStoreValue(initialData, loadedAt, me, emailEnabled);
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
 

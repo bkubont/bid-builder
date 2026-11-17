@@ -6,7 +6,7 @@ import { EmptyState } from "@/components/empty-state";
 import { InvoiceStatusBadge } from "@/components/status-badge";
 import { ButtonLink } from "@/components/ui/button-link";
 import { useStore } from "@/lib/store";
-import { grandTotal } from "@/lib/types";
+import { documentTotals } from "@/lib/types";
 import { formatCurrency, formatDate } from "@/lib/utils";
 
 export default function InvoicesPage() {
@@ -51,6 +51,9 @@ export default function InvoicesPage() {
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-semibold">{invoice.number}</span>
+                        {invoice.kind === "deposit" ? (
+                          <span className="rounded-lg bg-brand-muted px-2 py-0.5 text-xs font-semibold text-brand">Deposit</span>
+                        ) : null}
                         <InvoiceStatusBadge status={invoice.status} />
                       </div>
                       <p className="mt-1 text-sm text-muted-foreground">
@@ -61,9 +64,7 @@ export default function InvoicesPage() {
                       </p>
                     </div>
                     <p className="text-lg font-semibold tabular-nums">
-                      {formatCurrency(
-                        grandTotal(invoice.lineItems, invoice.taxPercent)
-                      )}
+                      {formatCurrency(documentTotals(invoice).balanceDue)}
                     </p>
                   </Link>
                 </li>

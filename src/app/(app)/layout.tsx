@@ -4,6 +4,7 @@ import { getDb } from "@/db";
 import { StoreProvider } from "@/lib/store";
 import { loadSnapshotWithTime } from "@/server/data";
 import { getCurrentUser, getMe } from "@/server/session";
+import { emailConfigured } from "@/server/email";
 import { NoCompany } from "@/components/auth/no-company";
 
 /** Everything inside requires a login. Data is loaded here once, on the server. */
@@ -18,6 +19,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <StoreProvider
       initialData={data}
       loadedAt={loadedAt}
+      emailEnabled={emailConfigured()}
       me={{ id: me.id, name: me.name, email: me.email, role: me.role, companyName: me.companyName }}
     >
       <AppShell>{children}</AppShell>
