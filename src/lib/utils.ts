@@ -56,3 +56,12 @@ export function isPastDate(value: string, now: Date = new Date()): boolean {
   if (!value) return false;
   return toDateOnly(value) < toDateOnly(now);
 }
+
+/**
+ * Full page load (not client navigation). Used after signing in or out so the
+ * app starts clean with the right account's data and nothing from the
+ * previous session stays in memory.
+ */
+export function hardNavigate(path: string) {
+  window.location.href = path;
+}

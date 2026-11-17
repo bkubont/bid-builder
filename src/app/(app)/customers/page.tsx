@@ -13,11 +13,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useStore } from "@/lib/store";
+import { useSafe, useStore } from "@/lib/store";
 import type { Customer } from "@/lib/types";
 
 export default function CustomersPage() {
   const { data, deleteCustomer, ready } = useStore();
+  const safe = useSafe();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Customer | undefined>();
 
@@ -82,7 +83,9 @@ export default function CustomersPage() {
                     const warning = jobs
                       ? ` They're on ${jobs} estimate${jobs === 1 ? "" : "s"}/invoice${jobs === 1 ? "" : "s"}, which will show "No customer".`
                       : "";
-                    if (window.confirm(`Delete ${customer.name}?${warning}`)) deleteCustomer(customer.id);
+                    if (window.confirm(`Delete ${customer.name}?${warning}`)) {
+                      void safe(() => deleteCustomer(customer.id), "Customer deleted");
+                    }
                   }}
                   aria-label="Delete customer"
                 >

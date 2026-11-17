@@ -1,443 +1,331 @@
 "use client";
 
 /**
- * Browser-local data store (interim until the Phase 2 database).
+ * App data on the client. The server is the source of truth: every change
+ * goes through a server action and the result is merged into local state.
  *
- * State lives in a module-level variable and every change is applied
- * synchronously, so an action can return what it just saved and two actions
- * in the same click (save, then convert) see each other's changes. Changes
- * made in another tab arrive through the `storage` event, so tabs no longer
- * overwrite each other.
+ * - The page loads with the company's data already rendered by the server.
+ * - A copy is kept on this device so the app can still be *viewed* offline.
+ * - Data refreshes when the app comes back into view, so changes made on
+ *   another device show up.
  */
-
 import {
   createContext,
+  useCallback,
   useContext,
+  useEffect,
   useMemo,
-  useSyncExternalStore,
+  useRef,
+  useState,
   type ReactNode,
 } from "react";
 import { v4 as uuid } from "uuid";
-import { createSeedData } from "./seed";
+import { hardNavigate } from "./utils";
+import * as actions from "@/server/actions";
+import type { ActionResult } from "@/server/actions";
 import type {
   AppData,
   CompanySettings,
   Customer,
   Estimate,
   Invoice,
+  InvoiceStatus,
   LineItem,
+  MeInfo,
   PricebookItem,
   ScheduleBlock,
 } from "./types";
-import { dateOnlyFromToday, toDateOnly } from "./utils";
 
-export const STORAGE_KEY = "bid-builder-v2";
+const CACHE_PREFIX = "bid-builder-cache:v1:";
+const REFRESH_MS = 2 * 60 * 1000;
 
-// ---------------------------------------------------------------------------
-// External store
-// ---------------------------------------------------------------------------
+export const OFFLINE_MESSAGE = "You're offline. You can look around, but changes can't be saved until you're back online.";
 
-let state: AppData | null = null;
-const listeners = new Set<() => void>();
-let warnedSaveFailure = false;
+type Toast = { id: number; message: string; tone: "info" | "error" };
 
-function normalizeData(raw: Partial<AppData> | null): AppData {
-  const seed = createSeedData();
-  if (!raw) return seed;
-  return {
-    company: { ...seed.company, ...(raw.company || {}) },
-    customers: raw.customers ?? seed.customers,
-    pricebook: raw.pricebook ?? seed.pricebook,
-    estimates: (raw.estimates ?? seed.estimates).map((e) => ({
-      ...e,
-      validUntil: toDateOnly(e.validUntil),
-    })),
-    invoices: (raw.invoices ?? seed.invoices).map((i) => ({
-      ...i,
-      dueDate: toDateOnly(i.dueDate),
-    })),
-    scheduleBlocks: raw.scheduleBlocks ?? [],
-    counters: { ...seed.counters, ...(raw.counters || {}) },
-  };
-}
+type EstimateInput = Omit<Estimate, "id" | "number" | "createdAt" | "updatedAt"> & { id?: string };
 
-function readStorage(): AppData {
+function readCache(userId: string): { savedAt: number; data: AppData } | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return createSeedData();
-    return normalizeData(JSON.parse(raw) as Partial<AppData>);
+    const raw = localStorage.getItem(CACHE_PREFIX + userId);
+    return raw ? JSON.parse(raw) : null;
   } catch {
-    return createSeedData();
+    return null;
   }
 }
 
-function writeStorage(data: AppData) {
+function writeCache(userId: string, data: AppData) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (error) {
-    console.error("Bid Builder could not save to this browser", error);
-    if (!warnedSaveFailure) {
-      warnedSaveFailure = true;
-      window.alert(
-        "Bid Builder couldn't save your last change on this device (browser storage is full or blocked). Keep this tab open and don't refresh."
-      );
+    localStorage.setItem(CACHE_PREFIX + userId, JSON.stringify({ savedAt: Date.now(), data }));
+  } catch {
+    // Storage full or blocked: offline viewing just won't have the latest copy.
+  }
+}
+
+/** Remove everything this app stored on the device (used on sign-out). */
+export async function clearDeviceData() {
+  try {
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith("bid-builder"))
+      .forEach((k) => localStorage.removeItem(k));
+  } catch {}
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => k.startsWith("bid-builder")).map((k) => caches.delete(k)));
     }
-  }
+  } catch {}
 }
 
-function emit() {
-  listeners.forEach((listener) => listener());
-}
-
-function onStorage(event: StorageEvent) {
-  if (event.key !== STORAGE_KEY) return;
+/** Unwrap a server action result, turning failures into readable errors. */
+async function call<T>(fn: () => Promise<ActionResult<T>>): Promise<T> {
+  if (typeof navigator !== "undefined" && !navigator.onLine) throw new Error(OFFLINE_MESSAGE);
+  let result: ActionResult<T>;
   try {
-    state = event.newValue
-      ? normalizeData(JSON.parse(event.newValue) as Partial<AppData>)
-      : createSeedData();
-    emit();
-  } catch {
-    // Ignore a malformed write from another tab; keep what we have.
+    result = await fn();
+  } catch (error) {
+    const text = String((error as Error)?.message ?? error);
+    if (/Server Action/i.test(text)) {
+      throw new Error("Bid Builder was just updated. Reload the page to keep working.");
+    }
+    throw new Error(navigator.onLine ? "Couldn't reach the server. Try again." : OFFLINE_MESSAGE);
   }
-}
-
-function subscribe(listener: () => void) {
-  listeners.add(listener);
-  if (listeners.size === 1) window.addEventListener("storage", onStorage);
-  return () => {
-    listeners.delete(listener);
-    if (listeners.size === 0) window.removeEventListener("storage", onStorage);
-  };
-}
-
-function getSnapshot(): AppData {
-  if (state === null) {
-    state = readStorage();
-    // Persist the seed on first run so other tabs share the same data.
-    writeStorage(state);
+  if (!result.ok) {
+    if (/session has ended/i.test(result.error)) {
+      hardNavigate("/login");
+    }
+    throw new Error(result.error);
   }
-  return state;
+  return result.data;
 }
 
-function getServerSnapshot(): AppData | null {
-  return null;
+function upsertById<T extends { id: string }>(list: T[], item: T, atStart = false): T[] {
+  const exists = list.some((x) => x.id === item.id);
+  if (exists) return list.map((x) => (x.id === item.id ? item : x));
+  return atStart ? [item, ...list] : [...list, item];
 }
 
-/** Apply a change synchronously, persist it, notify subscribers. */
-function commit<T>(change: (prev: AppData) => { next: AppData; result: T }): T {
-  const { next, result } = change(getSnapshot());
-  if (next !== state) {
-    state = next;
-    writeStorage(next);
-    emit();
-  }
-  return result;
-}
+function useStoreValue(initialData: AppData, loadedAt: number, me: MeInfo) {
+  const [data, setData] = useState<AppData>(() => {
+    // If the server copy came from the offline page cache, a newer copy saved
+    // on this device wins.
+    if (typeof window === "undefined") return initialData;
+    const cached = readCache(me.id);
+    return cached && cached.savedAt > loadedAt ? cached.data : initialData;
+  });
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [online, setOnline] = useState(true);
+  const pending = useRef(0);
 
-// ---------------------------------------------------------------------------
-// Actions
-// ---------------------------------------------------------------------------
+  const notify = useCallback((message: string, tone: Toast["tone"] = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts((t) => [...t.slice(-2), { id, message, tone }]);
+    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), tone === "error" ? 6000 : 2500);
+  }, []);
 
-type EstimateInput = Omit<Estimate, "id" | "number" | "createdAt" | "updatedAt"> & {
-  id?: string;
-  number?: string;
-};
+  // Keep the device copy current for offline viewing.
+  useEffect(() => {
+    writeCache(me.id, data);
+  }, [data, me.id]);
 
-type InvoiceInput = Omit<Invoice, "id" | "number" | "createdAt"> & {
-  id?: string;
-  number?: string;
-};
+  const refresh = useCallback(async () => {
+    if (pending.current > 0 || !navigator.onLine) return;
+    try {
+      const result = await actions.getSnapshotAction();
+      if (result.ok && pending.current === 0) setData(result.data);
+      else if (!result.ok && /session has ended/i.test(result.error)) hardNavigate("/login");
+    } catch {
+      // Offline or server unreachable: keep showing what we have.
+    }
+  }, []);
 
-const actions = {
-  updateCompany(patch: Partial<CompanySettings>) {
-    commit((prev) => ({
-      next: { ...prev, company: { ...prev.company, ...patch } },
-      result: undefined,
-    }));
-  },
+  // Refresh when the app comes back into view, and every few minutes while open.
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    update();
+    const onVisible = () => document.visibilityState === "visible" && refresh();
+    const onOnline = () => {
+      update();
+      refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", update);
+    const timer = window.setInterval(() => document.visibilityState === "visible" && refresh(), REFRESH_MS);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", update);
+      window.clearInterval(timer);
+    };
+  }, [refresh]);
 
-  upsertCustomer(customer: Omit<Customer, "id" | "createdAt"> & { id?: string }): Customer {
-    return commit((prev) => {
-      const existing = customer.id
-        ? prev.customers.find((c) => c.id === customer.id)
-        : undefined;
-      const saved: Customer = {
-        id: existing?.id ?? uuid(),
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-        address: customer.address,
-        notes: customer.notes,
-        createdAt: existing?.createdAt ?? new Date().toISOString(),
-      };
-      const customers = existing
-        ? prev.customers.map((c) => (c.id === existing.id ? saved : c))
-        : [...prev.customers, saved];
-      return { next: { ...prev, customers }, result: saved };
-    });
-  },
+  /** Run a server change; refreshes pause while it's in flight. */
+  const mutate = useCallback(async <T,>(fn: () => Promise<ActionResult<T>>): Promise<T> => {
+    pending.current++;
+    try {
+      return await call(fn);
+    } finally {
+      pending.current--;
+    }
+  }, []);
 
-  deleteCustomer(id: string) {
-    commit((prev) => ({
-      next: { ...prev, customers: prev.customers.filter((c) => c.id !== id) },
-      result: undefined,
-    }));
-  },
-
-  upsertPricebookItem(item: Omit<PricebookItem, "id"> & { id?: string }): PricebookItem {
-    return commit((prev) => {
-      const saved: PricebookItem = { ...item, id: item.id ?? uuid() };
-      const exists = prev.pricebook.some((p) => p.id === saved.id);
-      return {
-        next: {
-          ...prev,
-          pricebook: exists
-            ? prev.pricebook.map((p) => (p.id === saved.id ? saved : p))
-            : [...prev.pricebook, saved],
-        },
-        result: saved,
-      };
-    });
-  },
-
-  deletePricebookItem(id: string) {
-    commit((prev) => ({
-      next: { ...prev, pricebook: prev.pricebook.filter((p) => p.id !== id) },
-      result: undefined,
-    }));
-  },
-
-  upsertEstimate(estimate: EstimateInput): Estimate {
-    return commit((prev) => {
-      const existing = estimate.id
-        ? prev.estimates.find((e) => e.id === estimate.id)
-        : undefined;
-      const now = new Date().toISOString();
-      const counter = existing ? prev.counters.estimate : prev.counters.estimate + 1;
-      const saved: Estimate = {
-        id: existing?.id ?? uuid(),
-        number: existing?.number ?? estimate.number ?? `EST-${counter}`,
-        customerId: estimate.customerId,
-        jobTitle: estimate.jobTitle,
-        jobAddress: estimate.jobAddress,
-        trade: estimate.trade,
-        status: estimate.status,
-        lineItems: estimate.lineItems,
-        taxPercent: estimate.taxPercent,
-        notes: estimate.notes,
-        validUntil: estimate.validUntil,
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-      };
-      return {
-        next: {
-          ...prev,
-          estimates: existing
-            ? prev.estimates.map((e) => (e.id === existing.id ? saved : e))
-            : [...prev.estimates, saved],
-          counters: { ...prev.counters, estimate: counter },
-        },
-        result: saved,
-      };
-    });
-  },
-
-  deleteEstimate(id: string) {
-    commit((prev) => ({
-      next: {
-        ...prev,
-        estimates: prev.estimates.filter((e) => e.id !== id),
-        scheduleBlocks: prev.scheduleBlocks.filter((b) => b.estimateId !== id),
+  const api = useMemo(
+    () => ({
+      async updateCompany(company: CompanySettings) {
+        const saved = await mutate(() => actions.updateCompanyAction(company));
+        setData((d) => ({ ...d, company: saved }));
+        return true as const;
       },
-      result: undefined,
-    }));
-  },
 
-  duplicateEstimate(id: string): Estimate | null {
-    return commit((prev) => {
-      const source = prev.estimates.find((e) => e.id === id);
-      if (!source) return { next: prev, result: null };
-      const counter = prev.counters.estimate + 1;
-      const now = new Date().toISOString();
-      const copy: Estimate = {
-        ...source,
-        id: uuid(),
-        number: `EST-${counter}`,
-        status: "draft",
-        jobTitle: `${source.jobTitle} (copy)`,
-        lineItems: source.lineItems.map((li) => ({ ...li, id: uuid() })),
-        validUntil: dateOnlyFromToday(30),
-        createdAt: now,
-        updatedAt: now,
-      };
-      return {
-        next: {
-          ...prev,
-          estimates: [...prev.estimates, copy],
-          counters: { ...prev.counters, estimate: counter },
-        },
-        result: copy,
-      };
-    });
-  },
-
-  /**
-   * Create an invoice from an estimate. If one already exists for this
-   * estimate it is returned instead, so a double tap can't bill twice.
-   */
-  convertEstimateToInvoice(estimateId: string): Invoice | null {
-    return commit((prev) => {
-      const already = prev.invoices.find((i) => i.estimateId === estimateId);
-      if (already) return { next: prev, result: already };
-      const estimate = prev.estimates.find((e) => e.id === estimateId);
-      if (!estimate) return { next: prev, result: null };
-      const counter = prev.counters.invoice + 1;
-      const now = new Date().toISOString();
-      const invoice: Invoice = {
-        id: uuid(),
-        number: `INV-${counter}`,
-        estimateId: estimate.id,
-        customerId: estimate.customerId,
-        jobTitle: estimate.jobTitle,
-        jobAddress: estimate.jobAddress,
-        status: "draft",
-        lineItems: estimate.lineItems.map((li) => ({ ...li, id: uuid() })),
-        taxPercent: estimate.taxPercent,
-        notes: estimate.notes,
-        dueDate: dateOnlyFromToday(14),
-        createdAt: now,
-      };
-      return {
-        next: {
-          ...prev,
-          estimates: prev.estimates.map((e) =>
-            e.id === estimateId ? { ...e, status: "converted", updatedAt: now } : e
-          ),
-          invoices: [...prev.invoices, invoice],
-          counters: { ...prev.counters, invoice: counter },
-        },
-        result: invoice,
-      };
-    });
-  },
-
-  upsertInvoice(invoice: InvoiceInput): Invoice {
-    return commit((prev) => {
-      const existing = invoice.id
-        ? prev.invoices.find((i) => i.id === invoice.id)
-        : undefined;
-      const counter = existing ? prev.counters.invoice : prev.counters.invoice + 1;
-      const saved: Invoice = {
-        id: existing?.id ?? uuid(),
-        number: existing?.number ?? invoice.number ?? `INV-${counter}`,
-        estimateId: invoice.estimateId,
-        customerId: invoice.customerId,
-        jobTitle: invoice.jobTitle,
-        jobAddress: invoice.jobAddress,
-        status: invoice.status,
-        lineItems: invoice.lineItems,
-        taxPercent: invoice.taxPercent,
-        notes: invoice.notes,
-        dueDate: invoice.dueDate,
-        createdAt: existing?.createdAt ?? new Date().toISOString(),
-        // Only a paid invoice keeps a paid date.
-        paidAt:
-          invoice.status === "paid"
-            ? invoice.paidAt ?? existing?.paidAt ?? new Date().toISOString()
-            : undefined,
-      };
-      return {
-        next: {
-          ...prev,
-          invoices: existing
-            ? prev.invoices.map((i) => (i.id === existing.id ? saved : i))
-            : [...prev.invoices, saved],
-          counters: { ...prev.counters, invoice: counter },
-        },
-        result: saved,
-      };
-    });
-  },
-
-  deleteInvoice(id: string) {
-    commit((prev) => ({
-      next: { ...prev, invoices: prev.invoices.filter((i) => i.id !== id) },
-      result: undefined,
-    }));
-  },
-
-  markInvoicePaid(id: string) {
-    const now = new Date().toISOString();
-    commit((prev) => ({
-      next: {
-        ...prev,
-        invoices: prev.invoices.map((i) =>
-          i.id === id ? { ...i, status: "paid" as const, paidAt: now } : i
-        ),
+      async upsertCustomer(input: Omit<Customer, "id" | "createdAt"> & { id?: string }) {
+        const saved = await mutate(() => actions.upsertCustomerAction(input));
+        setData((d) => ({
+          ...d,
+          customers: upsertById(d.customers, saved).sort((a, b) => a.name.localeCompare(b.name)),
+        }));
+        return saved;
       },
-      result: undefined,
-    }));
-  },
 
-  upsertScheduleBlock(block: Omit<ScheduleBlock, "id"> & { id?: string }): ScheduleBlock {
-    return commit((prev) => {
-      const saved: ScheduleBlock = { ...block, id: block.id ?? uuid() };
-      const exists = prev.scheduleBlocks.some((b) => b.id === saved.id);
-      return {
-        next: {
-          ...prev,
-          scheduleBlocks: exists
-            ? prev.scheduleBlocks.map((b) => (b.id === saved.id ? saved : b))
-            : [...prev.scheduleBlocks, saved],
-        },
-        result: saved,
-      };
-    });
-  },
-
-  moveScheduleBlock(id: string, start: string) {
-    commit((prev) => ({
-      next: {
-        ...prev,
-        scheduleBlocks: prev.scheduleBlocks.map((b) => (b.id === id ? { ...b, start } : b)),
+      async deleteCustomer(id: string) {
+        await mutate(() => actions.deleteCustomerAction(id));
+        setData((d) => ({
+          ...d,
+          customers: d.customers.filter((c) => c.id !== id),
+          // The database clears the link; mirror it locally.
+          estimates: d.estimates.map((e) => (e.customerId === id ? { ...e, customerId: "" } : e)),
+          invoices: d.invoices.map((i) => (i.customerId === id ? { ...i, customerId: "" } : i)),
+        }));
+        return true as const;
       },
-      result: undefined,
-    }));
-  },
 
-  deleteScheduleBlock(id: string) {
-    commit((prev) => ({
-      next: { ...prev, scheduleBlocks: prev.scheduleBlocks.filter((b) => b.id !== id) },
-      result: undefined,
-    }));
-  },
+      async upsertPricebookItem(input: Omit<PricebookItem, "id"> & { id?: string }) {
+        const saved = await mutate(() => actions.upsertPricebookItemAction(input));
+        setData((d) => ({ ...d, pricebook: upsertById(d.pricebook, saved) }));
+        return saved;
+      },
 
-  resetDemoData() {
-    commit(() => ({ next: createSeedData(), result: undefined }));
-  },
-};
+      async deletePricebookItem(id: string) {
+        await mutate(() => actions.deletePricebookItemAction(id));
+        setData((d) => ({ ...d, pricebook: d.pricebook.filter((p) => p.id !== id) }));
+        return true as const;
+      },
 
-// ---------------------------------------------------------------------------
-// React bindings
-// ---------------------------------------------------------------------------
+      async upsertEstimate(input: EstimateInput) {
+        const saved = await mutate(() => actions.upsertEstimateAction(input));
+        setData((d) => ({ ...d, estimates: upsertById(d.estimates, saved, true) }));
+        return saved;
+      },
 
-type StoreContextValue = typeof actions & {
-  /** False during server render / first hydration pass. */
-  ready: boolean;
-  data: AppData;
-};
+      async deleteEstimate(id: string) {
+        await mutate(() => actions.deleteEstimateAction(id));
+        setData((d) => ({
+          ...d,
+          estimates: d.estimates.filter((e) => e.id !== id),
+          scheduleBlocks: d.scheduleBlocks.filter((b) => b.estimateId !== id),
+          invoices: d.invoices.map((i) => (i.estimateId === id ? { ...i, estimateId: undefined } : i)),
+        }));
+        return true as const;
+      },
 
-const StoreContext = createContext<StoreContextValue | null>(null);
+      async duplicateEstimate(id: string) {
+        const copy = await mutate(() => actions.duplicateEstimateAction(id));
+        setData((d) => ({ ...d, estimates: [copy, ...d.estimates] }));
+        return copy;
+      },
 
-// Placeholder shown only while not ready; pages render a loading state then.
-const EMPTY: AppData = createSeedData();
+      async convertEstimateToInvoice(estimateId: string): Promise<Invoice> {
+        const { invoice, estimate } = await mutate(() => actions.convertEstimateAction(estimateId));
+        setData((d) => ({
+          ...d,
+          estimates: upsertById(d.estimates, estimate),
+          invoices: upsertById(d.invoices, invoice, true),
+        }));
+        return invoice;
+      },
 
-export function StoreProvider({ children }: { children: ReactNode }) {
-  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-  const value = useMemo(
-    () => ({ ...actions, ready: snapshot !== null, data: snapshot ?? EMPTY }),
-    [snapshot]
+      async updateInvoice(input: { id: string; status: InvoiceStatus; dueDate?: string; notes?: string }) {
+        const saved = await mutate(() => actions.updateInvoiceAction(input));
+        setData((d) => ({ ...d, invoices: upsertById(d.invoices, saved) }));
+        return saved;
+      },
+
+      async markInvoicePaid(id: string) {
+        const saved = await mutate(() => actions.updateInvoiceAction({ id, status: "paid" }));
+        setData((d) => ({ ...d, invoices: upsertById(d.invoices, saved) }));
+        return saved;
+      },
+
+      async deleteInvoice(id: string) {
+        await mutate(() => actions.deleteInvoiceAction(id));
+        setData((d) => ({ ...d, invoices: d.invoices.filter((i) => i.id !== id) }));
+        return true as const;
+      },
+
+      async upsertScheduleBlock(input: Omit<ScheduleBlock, "id"> & { id?: string }) {
+        const saved = await mutate(() => actions.upsertScheduleBlockAction(input));
+        setData((d) => ({ ...d, scheduleBlocks: upsertById(d.scheduleBlocks, saved) }));
+        return saved;
+      },
+
+      /** Moves show immediately; undone if the server refuses. */
+      async moveScheduleBlock(id: string, start: string) {
+        let previous: string | undefined;
+        setData((d) => ({
+          ...d,
+          scheduleBlocks: d.scheduleBlocks.map((b) => {
+            if (b.id !== id) return b;
+            previous = b.start;
+            return { ...b, start };
+          }),
+        }));
+        try {
+          await mutate(() => actions.moveScheduleBlockAction(id, start));
+        } catch (error) {
+          setData((d) => ({
+            ...d,
+            scheduleBlocks: d.scheduleBlocks.map((b) =>
+              b.id === id && previous ? { ...b, start: previous } : b
+            ),
+          }));
+          throw error;
+        }
+        return true as const;
+      },
+
+      async deleteScheduleBlock(id: string) {
+        await mutate(() => actions.deleteScheduleBlockAction(id));
+        setData((d) => ({ ...d, scheduleBlocks: d.scheduleBlocks.filter((b) => b.id !== id) }));
+        return true as const;
+      },
+
+      async replaceWithTestData() {
+        const snapshot = await mutate(() => actions.replaceWithTestDataAction());
+        setData(snapshot);
+        return true as const;
+      },
+    }),
+    [mutate]
   );
+
+  return { ready: true as const, data, me, online, refresh, notify, toasts, ...api };
+}
+
+type StoreValue = ReturnType<typeof useStoreValue>;
+const StoreContext = createContext<StoreValue | null>(null);
+
+export function StoreProvider({
+  initialData,
+  loadedAt,
+  me,
+  children,
+}: {
+  initialData: AppData;
+  loadedAt: number;
+  me: MeInfo;
+  children: ReactNode;
+}) {
+  const value = useStoreValue(initialData, loadedAt, me);
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
 
@@ -445,6 +333,24 @@ export function useStore() {
   const ctx = useContext(StoreContext);
   if (!ctx) throw new Error("useStore must be used within StoreProvider");
   return ctx;
+}
+
+/** Show an action's error as a toast instead of throwing. Returns undefined on failure. */
+export function useSafe() {
+  const { notify } = useStore();
+  return useCallback(
+    async <T,>(fn: () => Promise<T>, success?: string): Promise<T | undefined> => {
+      try {
+        const result = await fn();
+        if (success) notify(success);
+        return result;
+      } catch (error) {
+        notify(error instanceof Error ? error.message : "Something went wrong.", "error");
+        return undefined;
+      }
+    },
+    [notify]
+  );
 }
 
 export function newLineItem(partial?: Partial<LineItem>, defaultMarkup = 20): LineItem {

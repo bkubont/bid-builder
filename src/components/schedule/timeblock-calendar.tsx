@@ -24,7 +24,7 @@ import {
 import { ChevronLeft, ChevronRight, GripVertical, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
-import { useStore } from "@/lib/store";
+import { useSafe, useStore } from "@/lib/store";
 import type { Estimate, ScheduleBlock } from "@/lib/types";
 import {
   blockTitle,
@@ -53,6 +53,7 @@ export function TimeblockCalendar() {
     moveScheduleBlock,
     deleteScheduleBlock,
   } = useStore();
+  const safe = useSafe();
   const [weekAnchor, setWeekAnchor] = useState(() => startOfWeek(new Date(), { weekStartsOn: 1 }));
   const [activePayload, setActivePayload] = useState<DragPayload | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -81,7 +82,7 @@ export function TimeblockCalendar() {
     );
 
     if (payload.kind === "block") {
-      moveScheduleBlock(payload.blockId, start.toISOString());
+      void safe(() => moveScheduleBlock(payload.blockId, start.toISOString()));
       return;
     }
 
@@ -91,13 +92,17 @@ export function TimeblockCalendar() {
     const lineItemIds =
       payload.kind === "line" ? [payload.lineItemId] : undefined;
     const hours = selectionHours(estimate, lineItemIds);
-    upsertScheduleBlock({
-      estimateId: estimate.id,
-      lineItemIds,
-      title: blockTitle(estimate, lineItemIds),
-      start: start.toISOString(),
-      durationMinutes: hoursToMinutes(hours),
-    });
+    void safe(
+      () =>
+        upsertScheduleBlock({
+          estimateId: estimate.id,
+          lineItemIds,
+          title: blockTitle(estimate, lineItemIds),
+          start: start.toISOString(),
+          durationMinutes: hoursToMinutes(hours),
+        }),
+      "Added to schedule"
+    );
   }
 
   function onDragStart(event: DragStartEvent) {
@@ -262,7 +267,7 @@ export function TimeblockCalendar() {
                     blocks={data.scheduleBlocks.filter((b) =>
                       isSameDay(new Date(b.start), day)
                     )}
-                    onDelete={deleteScheduleBlock}
+                    onDelete={(id) => void safe(() => deleteScheduleBlock(id), "Removed from schedule")}
                   />
                 ))}
               </div>

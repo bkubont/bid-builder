@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useStore } from "@/lib/store";
+import { useSafe, useStore } from "@/lib/store";
 import type { Invoice, InvoiceStatus } from "@/lib/types";
 import { grandTotal, lineTotal, subtotal, taxAmount, unitPrice } from "@/lib/types";
 import { INVOICE_STATUS_LABELS, categoryLabel } from "@/lib/trades";
@@ -20,7 +20,8 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 
 export function InvoiceView({ invoice }: { invoice: Invoice }) {
   const router = useRouter();
-  const { data, upsertInvoice, deleteInvoice, markInvoicePaid } = useStore();
+  const { data, updateInvoice, deleteInvoice, markInvoicePaid } = useStore();
+  const safe = useSafe();
   const customer = data.customers.find((c) => c.id === invoice.customerId);
 
   return (
@@ -58,7 +59,7 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
               <Button
                 type="button"
                 className="h-11 rounded-xl bg-attention text-foreground hover:bg-attention/90"
-                onClick={() => markInvoicePaid(invoice.id)}
+                onClick={() => safe(() => markInvoicePaid(invoice.id), "Marked paid")}
               >
                 <CheckCircle2 className="size-4" />
                 Mark paid
@@ -75,10 +76,10 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
             <Select
               value={invoice.status}
               onValueChange={(v) =>
-                upsertInvoice({
-                  ...invoice,
-                  status: (v || invoice.status) as InvoiceStatus,
-                })
+                safe(
+                  () => updateInvoice({ id: invoice.id, status: (v || invoice.status) as InvoiceStatus }),
+                  "Status updated"
+                )
               }
             >
               <SelectTrigger className="h-11 w-40 rounded-xl" aria-label="Invoice status">
@@ -190,8 +191,7 @@ export function InvoiceView({ invoice }: { invoice: Invoice }) {
             className="h-11 w-full rounded-xl text-rose-700 hover:bg-rose-50"
             onClick={() => {
               if (!window.confirm(`Delete invoice ${invoice.number}? This can't be undone.`)) return;
-              deleteInvoice(invoice.id);
-              router.push("/invoices");
+              void safe(() => deleteInvoice(invoice.id), "Invoice deleted").then((ok) => ok && router.push("/invoices"));
             }}
           >
             <Trash2 className="size-4" />

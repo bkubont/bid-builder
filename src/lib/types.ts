@@ -151,3 +151,12 @@ export function taxAmount(items: LineItem[], taxPercent: number): number {
 export function grandTotal(items: LineItem[], taxPercent: number): number {
   return roundCents(subtotal(items) + taxAmount(items, taxPercent));
 }
+
+/** The signed-in person, as the browser sees them. */
+export interface MeInfo {
+  id: string;
+  name: string;
+  email: string;
+  role: "owner" | "member";
+  companyName: string;
+}

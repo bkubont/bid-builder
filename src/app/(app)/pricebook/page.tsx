@@ -19,7 +19,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useStore } from "@/lib/store";
+import { useSafe, useStore } from "@/lib/store";
 import type { LineCategory, PricebookItem, Trade } from "@/lib/types";
 import { CATEGORIES, TRADES, categoryLabel, tradeLabel } from "@/lib/trades";
 import { NumberInput } from "@/components/ui/number-input";
@@ -27,6 +27,7 @@ import { formatCurrency } from "@/lib/utils";
 
 export default function PricebookPage() {
   const { data, upsertPricebookItem, deletePricebookItem, ready } = useStore();
+  const safe = useSafe();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<PricebookItem | undefined>();
   const [query, setQuery] = useState("");
@@ -120,7 +121,7 @@ export default function PricebookPage() {
                   className="size-10 text-rose-700"
                   onClick={() => {
                     if (window.confirm(`Delete "${item.name}" from the pricebook?`)) {
-                      deletePricebookItem(item.id);
+                      void safe(() => deletePricebookItem(item.id), "Item deleted");
                     }
                   }}
                   aria-label={`Delete ${item.name}`}
@@ -143,9 +144,12 @@ export default function PricebookPage() {
           <PricebookForm
             key={editing?.id ?? "new"}
             item={editing}
-            onSave={(values) => {
-              upsertPricebookItem({ ...values, id: editing?.id });
-              setOpen(false);
+            onSave={async (values) => {
+              const saved = await safe(
+                () => upsertPricebookItem({ ...values, id: editing?.id }),
+                editing ? "Item saved" : "Item added"
+              );
+              if (saved) setOpen(false);
             }}
           />
         </DialogContent>
@@ -159,7 +163,7 @@ function PricebookForm({
   onSave,
 }: {
   item?: PricebookItem;
-  onSave: (values: Omit<PricebookItem, "id">) => void;
+  onSave: (values: Omit<PricebookItem, "id">) => Promise<void>;
 }) {
   const [name, setName] = useState(item?.name || "");
   const [category, setCategory] = useState<LineCategory>(item?.category || "labor");
@@ -167,13 +171,15 @@ function PricebookForm({
   const [unit, setUnit] = useState(item?.unit || "ea");
   const [unitCost, setUnitCost] = useState(item?.unitCost ?? 0);
   const [keywords, setKeywords] = useState(item?.keywords.join(", ") || "");
+  const [busy, setBusy] = useState(false);
 
   return (
     <form
       className="space-y-4"
-      onSubmit={(e) => {
+      onSubmit={async (e) => {
         e.preventDefault();
-        onSave({
+        setBusy(true);
+        await onSave({
           name: name.trim(),
           category,
           trade,
@@ -184,6 +190,7 @@ function PricebookForm({
             .map((k) => k.trim().toLowerCase())
             .filter(Boolean),
         });
+        setBusy(false);
       }}
     >
       <div className="space-y-2">
@@ -239,8 +246,8 @@ function PricebookForm({
           placeholder="faucet, kitchen, plumbing"
         />
       </div>
-      <Button type="submit" className="h-12 rounded-xl bg-attention text-foreground hover:bg-attention/90">
-        Save item
+      <Button type="submit" disabled={busy} className="h-12 rounded-xl bg-attention text-foreground hover:bg-attention/90">
+        {busy ? "Saving…" : "Save item"}
       </Button>
     </form>
   );
