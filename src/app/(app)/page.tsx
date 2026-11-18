@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/page-header";
 import { EstimateStatusBadge } from "@/components/status-badge";
 import { ButtonLink } from "@/components/ui/button-link";
 import { useStore } from "@/lib/store";
-import { grandTotal } from "@/lib/types";
+import { documentTotals } from "@/lib/types";
 import { formatCurrency, formatDate } from "@/lib/utils";
 
 export default function HomePage() {
@@ -20,7 +20,7 @@ export default function HomePage() {
   );
   const unpaidInvoices = data.invoices.filter((i) => i.status !== "paid");
   const pipeline = openEstimates.reduce(
-    (sum, e) => sum + grandTotal(e.lineItems, e.taxPercent),
+    (sum, e) => sum + documentTotals(e).total,
     0
   );
   const recent = [...data.estimates]
@@ -81,7 +81,7 @@ export default function HomePage() {
             unpaidInvoices.length
               ? formatCurrency(
                   unpaidInvoices.reduce(
-                    (s, i) => s + grandTotal(i.lineItems, i.taxPercent),
+                    (s, i) => s + documentTotals(i).balanceDue,
                     0
                   )
                 )
@@ -128,9 +128,7 @@ export default function HomePage() {
                     <EstimateStatusBadge status={estimate.status} />
                   </div>
                   <p className="mt-4 text-right text-lg font-semibold tabular-nums">
-                    {formatCurrency(
-                      grandTotal(estimate.lineItems, estimate.taxPercent)
-                    )}
+                    {formatCurrency(documentTotals(estimate).total)}
                   </p>
                 </Link>
               );

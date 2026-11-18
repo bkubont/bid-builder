@@ -11,6 +11,7 @@ import {
   companies,
   companySettings,
   customers,
+  emailLog,
   estimates,
   invites,
   invoices,
@@ -29,6 +30,7 @@ import type {
   PricebookItem,
   ScheduleBlock,
 } from "@/lib/types";
+import { documentTotals, roundCents, type EstimateSection, type LineCategory, type LineItem } from "@/lib/types";
 import { dateOnlyFromToday } from "@/lib/utils";
 import type {
   CompanyInput,
@@ -90,7 +92,9 @@ const toEstimate = (r: EstimateRow): Estimate => ({
   trade: r.trade,
   status: r.status,
   lineItems: r.lineItems ?? [],
+  sections: r.sections ?? [],
   taxPercent: Number(r.taxPercent),
+  taxableCategories: r.taxableCategories ?? null,
   notes: r.notes,
   validUntil: r.validUntil,
   createdAt: r.createdAt.toISOString(),
@@ -100,13 +104,17 @@ const toEstimate = (r: EstimateRow): Estimate => ({
 const toInvoice = (r: InvoiceRow): Invoice => ({
   id: r.id,
   number: r.number,
+  kind: r.kind,
   estimateId: r.estimateId ?? undefined,
   customerId: r.customerId ?? "",
   jobTitle: r.jobTitle,
   jobAddress: r.jobAddress,
   status: r.status,
   lineItems: r.lineItems ?? [],
+  sections: r.sections ?? [],
   taxPercent: Number(r.taxPercent),
+  taxableCategories: r.taxableCategories ?? null,
+  depositApplied: Number(r.depositApplied) || 0,
   notes: r.notes,
   dueDate: r.dueDate,
   createdAt: r.createdAt.toISOString(),
@@ -153,6 +161,8 @@ export async function loadSnapshot(db: Db, companyId: string): Promise<AppData> 
       defaultMarkup: Number(s.defaultMarkup),
       defaultTax: Number(s.defaultTax),
       terms: s.terms,
+      taxableCategories: s.taxableCategories ?? DEFAULT_COMPANY.taxableCategories,
+      depositPercent: Number(s.depositPercent),
     },
     customers: cust.map(toCustomer),
     pricebook: pb.map(toPricebookItem),
@@ -190,6 +200,8 @@ export async function createCompany(
       defaultMarkup: DEFAULT_COMPANY.defaultMarkup,
       defaultTax: DEFAULT_COMPANY.defaultTax,
       terms: DEFAULT_COMPANY.terms,
+      taxableCategories: DEFAULT_COMPANY.taxableCategories,
+      depositPercent: DEFAULT_COMPANY.depositPercent,
       updatedAt: now,
     });
     await tx
@@ -217,6 +229,8 @@ export async function updateCompany(db: Db, companyId: string, input: CompanyInp
         defaultMarkup: input.defaultMarkup,
         defaultTax: input.defaultTax,
         terms: input.terms,
+        taxableCategories: input.taxableCategories,
+        depositPercent: input.depositPercent,
         updatedAt: new Date(),
       })
       .where(eq(companySettings.companyId, companyId));
@@ -238,6 +252,21 @@ async function nextNumber(tx: Exec, companyId: string, kind: "estimate" | "invoi
     .set(kind === "estimate" ? { estimateCounter: next } : { invoiceCounter: next })
     .where(eq(companySettings.companyId, companyId));
   return `${kind === "estimate" ? "EST" : "INV"}-${next}`;
+}
+
+async function companyTaxRule(db: Exec, companyId: string): Promise<LineCategory[]> {
+  const [row] = await db
+    .select({ taxable: companySettings.taxableCategories })
+    .from(companySettings)
+    .where(eq(companySettings.companyId, companyId))
+    .limit(1);
+  return row?.taxable ?? DEFAULT_COMPANY.taxableCategories;
+}
+
+/** Drop links to sections that don't exist on this estimate. */
+function cleanSections(lines: LineItem[], sections: EstimateSection[]): LineItem[] {
+  const ids = new Set(sections.map((s) => s.id));
+  return lines.map((l) => (l.sectionId && !ids.has(l.sectionId) ? { ...l, sectionId: undefined } : l));
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +387,8 @@ export async function upsertEstimate(db: Db, companyId: string, input: EstimateI
     jobAddress: input.jobAddress,
     trade: input.trade,
     status: input.status,
-    lineItems: input.lineItems,
+    lineItems: cleanSections(input.lineItems, input.sections),
+    sections: input.sections,
     taxPercent: input.taxPercent,
     notes: input.notes,
     validUntil: input.validUntil,
@@ -377,7 +407,9 @@ export async function upsertEstimate(db: Db, companyId: string, input: EstimateI
 
   return db.transaction(async (tx) => {
     const number = await nextNumber(tx, companyId, "estimate");
-    const row = { id: newId(), companyId, number, ...values, createdAt: now };
+    // New estimates keep the tax rule in force when they were made.
+    const taxableCategories = await companyTaxRule(tx, companyId);
+    const row = { id: newId(), companyId, number, ...values, taxableCategories, createdAt: now };
     await tx.insert(estimates).values(row);
     return toEstimate(row);
   });
@@ -428,12 +460,15 @@ export async function convertEstimateToInvoice(
       .for("update");
     if (!source) throw new UserError("This estimate was deleted on another device.");
 
-    const [already] = await t
+    const existing = await t
       .select()
       .from(invoices)
-      .where(and(eq(invoices.estimateId, estimateId), eq(invoices.companyId, companyId)))
-      .limit(1);
+      .where(and(eq(invoices.estimateId, estimateId), eq(invoices.companyId, companyId)));
+    const already = existing.find((i) => i.kind === "final");
     if (already) return { invoice: toInvoice(already), estimate: toEstimate(source) };
+    // Subtract a deposit that was already billed for this job.
+    const depositRow = existing.find((i) => i.kind === "deposit");
+    const depositApplied = depositRow ? documentTotals(toInvoice(depositRow)).total : 0;
 
     const now = new Date();
     const number = await nextNumber(t, companyId, "invoice");
@@ -441,13 +476,17 @@ export async function convertEstimateToInvoice(
       id: newId(),
       companyId,
       number,
+      kind: "final",
       estimateId: source.id,
       customerId: source.customerId,
       jobTitle: source.jobTitle,
       jobAddress: source.jobAddress,
       status: "draft",
       lineItems: (source.lineItems ?? []).map((li) => ({ ...li, id: newId() })),
+      sections: source.sections,
       taxPercent: source.taxPercent,
+      taxableCategories: source.taxableCategories,
+      depositApplied,
       notes: source.notes,
       dueDate: dateOnlyFromToday(14),
       paidAt: null,
@@ -463,6 +502,83 @@ export async function convertEstimateToInvoice(
       invoice: toInvoice(row),
       estimate: toEstimate({ ...source, status: "converted", updatedAt: now }),
     };
+  });
+}
+
+/**
+ * Bill a share of the estimate up front. One deposit per estimate (also
+ * enforced by a unique index); asking again returns the existing one.
+ * The final invoice subtracts it.
+ */
+export async function createDepositInvoice(
+  db: Db,
+  companyId: string,
+  estimateId: string,
+  percent: number
+): Promise<{ invoice: Invoice; estimate: Estimate }> {
+  if (!(percent > 0 && percent <= 100)) throw new UserError("Enter a deposit between 1% and 100%.");
+  return db.transaction(async (t) => {
+    const [source] = await t
+      .select()
+      .from(estimates)
+      .where(and(eq(estimates.id, estimateId), eq(estimates.companyId, companyId)))
+      .for("update");
+    if (!source) throw new UserError("This estimate was deleted on another device.");
+    const existing = await t
+      .select()
+      .from(invoices)
+      .where(and(eq(invoices.estimateId, estimateId), eq(invoices.companyId, companyId)));
+    const already = existing.find((i) => i.kind === "deposit");
+    if (already) return { invoice: toInvoice(already), estimate: toEstimate(source) };
+    if (existing.some((i) => i.kind === "final")) {
+      throw new UserError("This job already has its final invoice, so a deposit can't be added.");
+    }
+    const estimate = toEstimate(source);
+    const amount = roundCents((documentTotals(estimate).total * percent) / 100);
+    if (amount <= 0) throw new UserError("Add priced lines to the estimate before requesting a deposit.");
+
+    const now = new Date();
+    const number = await nextNumber(t, companyId, "invoice");
+    const pct = Number(percent.toFixed(2));
+    const row: InvoiceRow = {
+      id: newId(),
+      companyId,
+      number,
+      kind: "deposit",
+      estimateId: source.id,
+      customerId: source.customerId,
+      jobTitle: source.jobTitle,
+      jobAddress: source.jobAddress,
+      status: "draft",
+      lineItems: [
+        {
+          id: newId(),
+          description: `Deposit (${pct}%) for ${source.number} — ${source.jobTitle}`.slice(0, 300),
+          category: "other",
+          quantity: 1,
+          unit: "ea",
+          unitCost: amount,
+          markupPercent: 0,
+        },
+      ],
+      sections: [],
+      taxPercent: 0, // the deposit is a share of the taxed total
+      taxableCategories: [],
+      depositApplied: 0,
+      notes: "Deposit due on acceptance. It will be subtracted from the final invoice.",
+      dueDate: dateOnlyFromToday(0),
+      paidAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await t.insert(invoices).values(row);
+    // Asking for a deposit means the customer said yes.
+    const status = source.status === "converted" ? source.status : "accepted";
+    await t
+      .update(estimates)
+      .set({ status, updatedAt: now })
+      .where(and(eq(estimates.id, estimateId), eq(estimates.companyId, companyId)));
+    return { invoice: toInvoice(row), estimate: toEstimate({ ...source, status, updatedAt: now }) };
   });
 }
 
@@ -487,7 +603,35 @@ export async function updateInvoice(db: Db, companyId: string, input: InvoiceUpd
 }
 
 export async function deleteInvoice(db: Db, companyId: string, invoiceId: string) {
-  await db.delete(invoices).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId)));
+  await db.transaction(async (t) => {
+    const [target] = await t
+      .select({ kind: invoices.kind, estimateId: invoices.estimateId })
+      .from(invoices)
+      .where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId)))
+      .for("update");
+    if (!target) return;
+    // A deposit already subtracted on the final invoice can't just disappear,
+    // or the final invoice would credit money that was never billed.
+    if (target.kind === "deposit" && target.estimateId) {
+      const [final] = await t
+        .select({ number: invoices.number, depositApplied: invoices.depositApplied })
+        .from(invoices)
+        .where(
+          and(
+            eq(invoices.estimateId, target.estimateId),
+            eq(invoices.companyId, companyId),
+            eq(invoices.kind, "final")
+          )
+        )
+        .limit(1);
+      if (final && Number(final.depositApplied) > 0) {
+        throw new UserError(
+          `This deposit is already subtracted on final invoice ${final.number}. Delete ${final.number} first if the deposit needs to go.`
+        );
+      }
+    }
+    await t.delete(invoices).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId)));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +753,9 @@ export async function replaceWithTestData(db: Db, companyId: string) {
           trade: e.trade,
           status: e.status,
           lineItems,
+          sections: e.sections,
           taxPercent: e.taxPercent,
+          taxableCategories: e.taxableCategories,
           notes: e.notes,
           validUntil: e.validUntil,
           createdAt: new Date(e.createdAt),
@@ -622,13 +768,17 @@ export async function replaceWithTestData(db: Db, companyId: string) {
         id: remap(i.id),
         companyId,
         number: i.number,
+        kind: i.kind,
         estimateId: i.estimateId ? remap(i.estimateId) : null,
         customerId: remap(i.customerId),
         jobTitle: i.jobTitle,
         jobAddress: i.jobAddress,
         status: i.status,
         lineItems: remapLines(i.lineItems),
+        sections: i.sections,
         taxPercent: i.taxPercent,
+        taxableCategories: i.taxableCategories,
+        depositApplied: i.depositApplied,
         notes: i.notes,
         dueDate: i.dueDate,
         paidAt: i.paidAt ? new Date(i.paidAt) : null,
@@ -819,4 +969,97 @@ export async function takeAiDraft(db: Db, companyId: string, day: string, limit:
     .where(and(eq(aiUsage.companyId, companyId), eq(aiUsage.day, day)))
     .limit(1);
   return (row?.count ?? 0) <= limit;
+}
+
+// ---------------------------------------------------------------------------
+// Email
+// ---------------------------------------------------------------------------
+
+/** The estimate or invoice being emailed, with its customer, if it's this company's. */
+export async function getDocumentForEmail(
+  db: Db,
+  companyId: string,
+  documentType: "estimate" | "invoice",
+  documentId: string
+) {
+  if (documentType === "estimate") {
+    const row = await getEstimateRow(db, companyId, documentId);
+    return row ? { number: row.number, status: row.status } : undefined;
+  }
+  const [row] = await db
+    .select({ number: invoices.number, status: invoices.status })
+    .from(invoices)
+    .where(and(eq(invoices.id, documentId), eq(invoices.companyId, companyId)))
+    .limit(1);
+  return row;
+}
+
+export async function countEmailsSince(db: Db, companyId: string, since: Date): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)` })
+    .from(emailLog)
+    .where(and(eq(emailLog.companyId, companyId), sql`${emailLog.createdAt} >= ${since}`));
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * Reserve one email against the company's 24-hour limit before sending.
+ * The company's settings row is locked while counting, so two sends at the
+ * same moment can't both squeeze under the limit. Returns the log row id;
+ * call confirmEmailSent after sending, or releaseEmailSlot if it failed.
+ */
+export async function reserveEmailSlot(
+  db: Db,
+  companyId: string,
+  input: { sentBy: string; documentType: "estimate" | "invoice"; documentId: string; toEmail: string },
+  limit: number
+): Promise<string> {
+  return db.transaction(async (t) => {
+    await t
+      .select({ id: companySettings.companyId })
+      .from(companySettings)
+      .where(eq(companySettings.companyId, companyId))
+      .for("update");
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const [row] = await t
+      .select({ n: sql<number>`count(*)` })
+      .from(emailLog)
+      .where(and(eq(emailLog.companyId, companyId), sql`${emailLog.createdAt} >= ${since}`));
+    if (Number(row?.n ?? 0) >= limit) {
+      throw new UserError("Today's email limit is reached. Use Share, or try again tomorrow.");
+    }
+    const id = newId();
+    await t.insert(emailLog).values({ id, companyId, ...input, providerId: null, createdAt: new Date() });
+    return id;
+  });
+}
+
+/** The send failed: give the slot back. */
+export async function releaseEmailSlot(db: Db, companyId: string, logId: string) {
+  await db.delete(emailLog).where(and(eq(emailLog.id, logId), eq(emailLog.companyId, companyId)));
+}
+
+/** The email went out: note the provider's id and mark a draft document as sent. */
+export async function confirmEmailSent(
+  db: Db,
+  companyId: string,
+  logId: string,
+  input: { documentType: "estimate" | "invoice"; documentId: string; providerId?: string }
+) {
+  const now = new Date();
+  await db
+    .update(emailLog)
+    .set({ providerId: input.providerId ?? null })
+    .where(and(eq(emailLog.id, logId), eq(emailLog.companyId, companyId)));
+  if (input.documentType === "estimate") {
+    await db
+      .update(estimates)
+      .set({ status: "sent", updatedAt: now })
+      .where(and(eq(estimates.id, input.documentId), eq(estimates.companyId, companyId), eq(estimates.status, "draft")));
+  } else {
+    await db
+      .update(invoices)
+      .set({ status: "sent", updatedAt: now })
+      .where(and(eq(invoices.id, input.documentId), eq(invoices.companyId, companyId), eq(invoices.status, "draft")));
+  }
 }

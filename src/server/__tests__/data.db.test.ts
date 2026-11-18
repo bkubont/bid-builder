@@ -28,7 +28,7 @@ suite("data layer (database)", () => {
 
   beforeEach(async () => {
     await db.execute(sql`SET FOREIGN_KEY_CHECKS = 0`);
-    for (const t of ["ai_usage", "schedule_blocks", "invoices", "estimates", "customers", "pricebook_items", "invites", "memberships", "company_settings", "companies", "session", "account", "verification", "user"]) {
+    for (const t of ["email_log", "ai_usage", "schedule_blocks", "invoices", "estimates", "customers", "pricebook_items", "invites", "memberships", "company_settings", "companies", "session", "account", "verification", "user"]) {
       await db.execute(sql.raw(`DELETE FROM \`${t}\``));
     }
     await db.execute(sql`SET FOREIGN_KEY_CHECKS = 1`);
@@ -49,6 +49,7 @@ suite("data layer (database)", () => {
     trade: "carpentry" as const,
     status: "draft" as const,
     lineItems: [{ id: "l1", description: "Labor", category: "labor" as const, quantity: 3, unit: "hr", unitCost: 110.5, markupPercent: 20 }],
+    sections: [] as { id: string; name: string }[],
     taxPercent: 6,
     notes: "",
     validUntil: "2026-12-20",
@@ -148,7 +149,9 @@ suite("data layer (database)", () => {
     expect(sa.customers).toHaveLength(8);
     expect(sa.pricebook.length).toBeGreaterThan(30);
     expect(sa.estimates).toHaveLength(9);
-    expect(sa.invoices).toHaveLength(3);
+    expect(sa.invoices).toHaveLength(4);
+    expect(sa.invoices.filter((i) => i.kind === "deposit")).toHaveLength(1);
+    expect(sa.estimates.find((e) => e.jobTitle.startsWith("Deck"))!.sections).toHaveLength(3);
     expect(sa.scheduleBlocks).toHaveLength(6);
     const idsA = new Set(sa.customers.map((c) => c.id));
     expect(sb.customers.some((c) => idsA.has(c.id))).toBe(false);
@@ -159,6 +162,11 @@ suite("data layer (database)", () => {
     // new estimates continue after the test numbers
     const next = await data.upsertEstimate(db, a.companyId, estimateInput(sa.customers[0].id));
     expect(next.number).toBe("EST-1010");
+    // the deck's final invoice subtracts the seeded deposit
+    const deck = sa.estimates.find((e) => e.jobTitle.startsWith("Deck"))!;
+    const { invoice } = await data.convertEstimateToInvoice(db, a.companyId, deck.id);
+    expect(invoice.number).toBe("INV-2005");
+    expect(invoice.depositApplied).toBeGreaterThan(0);
   });
 
   it("invites: link works once, expires, and can't be reused", async () => {
@@ -175,6 +183,135 @@ suite("data layer (database)", () => {
     const members = await data.listMembers(db, companyId);
     expect(members.map((m) => m.role).sort()).toEqual(["member", "owner"]);
     await expect(data.removeMember(db, companyId, userId)).rejects.toThrow(/last Owner/);
+  });
+
+  it("new estimates keep the company's tax rule from when they were made", async () => {
+    const { companyId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const first = await data.upsertEstimate(db, companyId, estimateInput(c.id));
+    expect(first.taxableCategories).toEqual(["material"]);
+    const snap = await data.loadSnapshot(db, companyId);
+    await data.updateCompany(db, companyId, { ...snap.company, taxableCategories: ["labor", "material"] });
+    const second = await data.upsertEstimate(db, companyId, estimateInput(c.id));
+    expect(second.taxableCategories).toEqual(["labor", "material"]);
+    // editing the first estimate doesn't change its rule
+    const edited = await data.upsertEstimate(db, companyId, { ...estimateInput(c.id), id: first.id, jobTitle: "Edited" });
+    expect(edited.taxableCategories).toEqual(["material"]);
+    const after = await data.loadSnapshot(db, companyId);
+    expect(after.estimates.find((e) => e.id === first.id)!.taxableCategories).toEqual(["material"]);
+  });
+
+  it("keeps sections and drops links to sections that no longer exist", async () => {
+    const { companyId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, companyId, {
+      ...estimateInput(c.id),
+      sections: [{ id: "s1", name: "Demo" }],
+      lineItems: [
+        { id: "a", description: "Tear-off", category: "labor", quantity: 1, unit: "hr", unitCost: 50, markupPercent: 0, sectionId: "s1" },
+        { id: "b", description: "Orphan", category: "labor", quantity: 1, unit: "hr", unitCost: 50, markupPercent: 0, sectionId: "gone" },
+      ],
+    });
+    const [saved] = (await data.loadSnapshot(db, companyId)).estimates;
+    expect(saved.sections).toEqual([{ id: "s1", name: "Demo" }]);
+    expect(saved.lineItems.map((l) => l.sectionId)).toEqual(["s1", undefined]);
+    // sections carry onto the invoice
+    const { invoice } = await data.convertEstimateToInvoice(db, companyId, e.id);
+    expect(invoice.sections).toEqual([{ id: "s1", name: "Demo" }]);
+  });
+
+  it("deposit: one per estimate, then the final invoice subtracts it", async () => {
+    const { companyId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, companyId, {
+      ...estimateInput(c.id),
+      lineItems: [{ id: "m", description: "Materials", category: "material", quantity: 1, unitCost: 1000, unit: "ea", markupPercent: 0 }],
+    });
+    // total = 1000 + 6% tax on materials = 1060; 50% deposit = 530
+    const [d1, d2] = await Promise.all([
+      data.createDepositInvoice(db, companyId, e.id, 50),
+      data.createDepositInvoice(db, companyId, e.id, 50),
+    ]).catch(async () => {
+      // A concurrent duplicate may lose the race on the unique index; the retry returns the existing one.
+      const again = await data.createDepositInvoice(db, companyId, e.id, 50);
+      return [again, again];
+    });
+    expect(d1.invoice.id).toBe(d2.invoice.id);
+    expect(d1.invoice.kind).toBe("deposit");
+    expect(d1.invoice.lineItems[0].unitCost).toBe(530);
+    expect(d1.estimate.status).toBe("accepted");
+
+    const { invoice: final } = await data.convertEstimateToInvoice(db, companyId, e.id);
+    expect(final.kind).toBe("final");
+    expect(final.depositApplied).toBe(530);
+    const snap = await data.loadSnapshot(db, companyId);
+    expect(snap.invoices).toHaveLength(2);
+    const totals = (await import("@/lib/types")).documentTotals(snap.invoices.find((i) => i.kind === "final")!);
+    expect(totals.total).toBe(1060);
+    expect(totals.balanceDue).toBe(530);
+    // no deposit after the final invoice exists
+    await expect(data.createDepositInvoice(db, companyId, e.id, 50).then((r) => r.invoice.id)).resolves.toBe(d1.invoice.id);
+  });
+
+  it("refuses a deposit once the final invoice exists, and bad percents", async () => {
+    const { companyId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, companyId, estimateInput(c.id));
+    await expect(data.createDepositInvoice(db, companyId, e.id, 0)).rejects.toThrow(data.UserError);
+    await expect(data.createDepositInvoice(db, companyId, e.id, 150)).rejects.toThrow(data.UserError);
+    await data.convertEstimateToInvoice(db, companyId, e.id);
+    await expect(data.createDepositInvoice(db, companyId, e.id, 50)).rejects.toThrow(/final invoice/);
+    const other = await makeCompany("b");
+    await expect(data.createDepositInvoice(db, other.companyId, e.id, 50)).rejects.toThrow(data.UserError);
+  });
+
+  it("logs sent emails, counts them for the limit, and marks drafts as sent", async () => {
+    const { companyId, userId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, companyId, estimateInput(c.id));
+    const since = new Date(Date.now() - 60_000);
+    const msg = { sentBy: userId, documentType: "estimate" as const, documentId: e.id, toEmail: "pat@example.com" };
+    expect(await data.countEmailsSince(db, companyId, since)).toBe(0);
+    const logId = await data.reserveEmailSlot(db, companyId, msg, 10);
+    expect(await data.countEmailsSince(db, companyId, since)).toBe(1);
+    expect((await data.loadSnapshot(db, companyId)).estimates[0].status).toBe("draft"); // not until it's sent
+    await data.confirmEmailSent(db, companyId, logId, { documentType: "estimate", documentId: e.id, providerId: "x" });
+    expect((await data.loadSnapshot(db, companyId)).estimates[0].status).toBe("sent");
+    // a failed send gives its slot back
+    const failed = await data.reserveEmailSlot(db, companyId, msg, 10);
+    await data.releaseEmailSlot(db, companyId, failed);
+    expect(await data.countEmailsSince(db, companyId, since)).toBe(1);
+    expect(await data.getDocumentForEmail(db, (await makeCompany("b")).companyId, "estimate", e.id)).toBeUndefined();
+  });
+
+  it("never lets parallel sends go over the daily email limit", async () => {
+    const { companyId, userId } = await makeCompany("a");
+    const msg = { sentBy: userId, documentType: "estimate" as const, documentId: "doc", toEmail: "x@example.com" };
+    const results = await Promise.allSettled(Array.from({ length: 8 }, () => data.reserveEmailSlot(db, companyId, msg, 3)));
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(3);
+    expect(results.filter((r) => r.status === "rejected").every((r) => (r as PromiseRejectedResult).reason instanceof data.UserError)).toBe(true);
+  });
+
+  it("won't delete a deposit the final invoice already subtracts", async () => {
+    const { companyId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, companyId, estimateInput(c.id));
+    const { invoice: deposit } = await data.createDepositInvoice(db, companyId, e.id, 50);
+    const { invoice: final } = await data.convertEstimateToInvoice(db, companyId, e.id);
+    await expect(data.deleteInvoice(db, companyId, deposit.id)).rejects.toThrow(new RegExp(final.number));
+    // delete the final first, then the deposit can go
+    await data.deleteInvoice(db, companyId, final.id);
+    await data.deleteInvoice(db, companyId, deposit.id);
+    expect((await data.loadSnapshot(db, companyId)).invoices).toHaveLength(0);
+  });
+
+  it("can delete a deposit before any final invoice exists", async () => {
+    const { companyId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, companyId, estimateInput(c.id));
+    const { invoice: deposit } = await data.createDepositInvoice(db, companyId, e.id, 50);
+    await data.deleteInvoice(db, companyId, deposit.id);
+    expect((await data.loadSnapshot(db, companyId)).invoices).toHaveLength(0);
   });
 
   it("enforces the daily AI draft limit per company", async () => {

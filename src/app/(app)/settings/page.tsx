@@ -11,7 +11,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { AccountSection } from "@/components/settings/account-section";
 import { TeamSection } from "@/components/settings/team-section";
 import { useSafe, useStore } from "@/lib/store";
-import type { CompanySettings } from "@/lib/types";
+import type { CompanySettings, LineCategory } from "@/lib/types";
+import { describeTaxable } from "@/lib/types";
+import { CATEGORIES } from "@/lib/trades";
 
 export default function SettingsPage() {
   const { data, me } = useStore();
@@ -144,6 +146,49 @@ function CompanyForm({ company, editable }: { company: CompanySettings; editable
               onValueChange={(defaultTax) => setForm({ ...form, defaultTax })}
             />
           </div>
+        </div>
+        <fieldset className="space-y-2 rounded-2xl border border-border p-3">
+          <legend className="px-1 text-sm font-medium">Sales tax applies to</legend>
+          <div className="flex flex-wrap gap-2">
+            {CATEGORIES.map((c) => {
+              const on = form.taxableCategories.includes(c.value);
+              return (
+                <label
+                  key={c.value}
+                  className="flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-border bg-white px-3 has-[:checked]:border-brand has-[:checked]:bg-brand-muted"
+                >
+                  <input
+                    type="checkbox"
+                    className="size-4 accent-[var(--color-brand,#0504AA)]"
+                    checked={on}
+                    onChange={() =>
+                      setForm({
+                        ...form,
+                        taxableCategories: on
+                          ? form.taxableCategories.filter((x) => x !== c.value)
+                          : ([...form.taxableCategories, c.value] as LineCategory[]),
+                      })
+                    }
+                  />
+                  {c.label}
+                </label>
+              );
+            })}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            New estimates tax {describeTaxable(form.taxableCategories)}. Estimates and invoices you&apos;ve
+            already made keep the rule they were made with. Check the rules for your state with your accountant.
+          </p>
+        </fieldset>
+        <div className="space-y-2 sm:max-w-xs">
+          <Label htmlFor="co-deposit">Default deposit %</Label>
+          <NumberInput
+            id="co-deposit"
+            className="h-12 rounded-xl"
+            value={form.depositPercent}
+            onValueChange={(depositPercent) => setForm({ ...form, depositPercent })}
+          />
+          <p className="text-xs text-muted-foreground">Suggested when you tap Request deposit on an estimate.</p>
         </div>
         <div className="space-y-2">
           <Label htmlFor="co-terms">Terms</Label>

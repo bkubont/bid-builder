@@ -72,7 +72,7 @@ describe("AI response cleanup", () => {
     const [line] = linesFromAi(
       [{ pricebookItemId: "pb-faucet", description: "Faucet", category: "material", quantity: 1, unitCost: 9999 }],
       req
-    );
+    ).lineItems;
     expect(line.unitCost).toBe(185);
     expect(line.markupPercent).toBe(25);
   });
@@ -84,8 +84,23 @@ describe("AI response cleanup", () => {
         { description: "Mystery", category: "weird", quantity: -5, unitCost: "abc" },
       ],
       req
-    );
+    ).lineItems;
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ category: "other", quantity: 0, unitCost: 0, unit: "ea" });
+  });
+
+  it("turns suggested section names into sections, merging repeats", () => {
+    const { lineItems, sections } = linesFromAi(
+      [
+        { section: "Demo", description: "Tear out", category: "labor", quantity: 2 },
+        { section: "demo", description: "Dumpster", category: "equipment", quantity: 1 },
+        { section: "Finish", description: "Paint", category: "material", quantity: 3 },
+        { description: "No section", category: "other", quantity: 1 },
+      ],
+      req
+    );
+    expect(sections.map((x) => x.name)).toEqual(["Demo", "Finish"]);
+    expect(lineItems[0].sectionId).toBe(lineItems[1].sectionId);
+    expect(lineItems[3].sectionId).toBeUndefined();
   });
 });

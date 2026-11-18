@@ -1,8 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Copy, FileDown, Plus, Receipt, Sparkles, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, FileDown, FolderPlus, HandCoins, Plus, Receipt, Send, Sparkles, Trash2 } from "lucide-react";
+import { v4 as uuid } from "uuid";
+import { SendDialog } from "@/components/documents/send-dialog";
+import type { PdfOptions } from "@/lib/pdf";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -16,8 +19,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { newLineItem, useSafe, useStore } from "@/lib/store";
-import type { Estimate, EstimateStatus, LineCategory, LineItem, Trade } from "@/lib/types";
-import { grandTotal, lineTotal, subtotal, taxAmount, unitPrice } from "@/lib/types";
+import type { Estimate, EstimateSection, EstimateStatus, LineCategory, LineItem, Trade } from "@/lib/types";
+import { describeTaxable, documentTotals, groupBySection, lineTotal, unitPrice } from "@/lib/types";
 import {
   CATEGORIES,
   ESTIMATE_STATUS_LABELS,
@@ -28,7 +31,7 @@ import {
 import { dateOnlyFromToday, formatCurrency, toDateOnly } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
 
-type PendingDraft = { lineItems: LineItem[]; message: string };
+type PendingDraft = { lineItems: LineItem[]; sections: EstimateSection[]; message: string };
 
 /** A line counts as "filled in" if it has a description or a price. */
 function hasContent(item: LineItem) {
@@ -49,11 +52,15 @@ export function EstimateBuilder({
     deleteEstimate,
     duplicateEstimate,
     convertEstimateToInvoice,
+    requestDeposit,
   } = useStore();
 
   const existing = estimateId ? data.estimates.find((e) => e.id === estimateId) : undefined;
   const invoice = existing
-    ? data.invoices.find((i) => i.estimateId === existing.id)
+    ? data.invoices.find((i) => i.estimateId === existing.id && i.kind === "final")
+    : undefined;
+  const depositInvoice = existing
+    ? data.invoices.find((i) => i.estimateId === existing.id && i.kind === "deposit")
     : undefined;
 
   const seedCustomerId = existing?.customerId || initialCustomerId || "";
@@ -77,6 +84,13 @@ export function EstimateBuilder({
       ? existing.lineItems
       : [newLineItem({}, data.company.defaultMarkup)]
   );
+  const [sections, setSections] = useState<EstimateSection[]>(() => existing?.sections ?? []);
+  /** Section the pricebook adds into ("" = Other work). */
+  const [targetSection, setTargetSection] = useState("");
+  const [sendPdf, setSendPdf] = useState<PdfOptions | null>(null);
+  const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
+  // Tax rule: kept from when the estimate was made; new ones follow company settings.
+  const taxable = existing ? existing.taxableCategories : data.company.taxableCategories;
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
@@ -88,14 +102,23 @@ export function EstimateBuilder({
   const safe = useSafe();
 
   const customer = data.customers.find((c) => c.id === customerId);
-  const totals = useMemo(
-    () => ({
-      sub: subtotal(lineItems),
-      tax: taxAmount(lineItems, taxPercent),
-      grand: grandTotal(lineItems, taxPercent),
-    }),
-    [lineItems, taxPercent]
-  );
+  const totals = useMemo(() => {
+    const t = documentTotals({ lineItems, taxPercent, taxableCategories: taxable });
+    return { sub: t.subtotal, tax: t.tax, grand: t.total };
+  }, [lineItems, taxPercent, taxable]);
+
+  // Warn before leaving the page (reload, close tab) with unsaved changes.
+  const snapshotWith = (st: EstimateStatus) =>
+    JSON.stringify([customerId, jobTitle, jobAddress, trade, st, taxPercent, notes, validUntil, lineItems.filter(hasContent), sections]);
+  const formSnapshot = snapshotWith(status);
+  const [initialSnapshot] = useState(formSnapshot);
+  const dirty = formSnapshot !== (savedSnapshot ?? initialSnapshot);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   const filteredPricebook = data.pricebook.filter((item) => {
     const q = pricebookFilter.trim().toLowerCase();
@@ -131,17 +154,67 @@ export function EstimateBuilder({
           quantity: 1,
           unit: item.unit,
           unitCost: item.unitCost,
+          sectionId: targetSection || undefined,
         },
         data.company.defaultMarkup
       ),
     ]);
-    flash(`Added ${item.name}`);
+    const where = sections.find((x) => x.id === targetSection)?.name;
+    flash(`Added ${item.name}${where ? ` to ${where}` : ""}`);
+  }
+
+  function addSection() {
+    const section = { id: uuid(), name: "" };
+    setSections((prev) => [...prev, section]);
+    setTargetSection(section.id);
+  }
+
+  function renameSection(id: string, name: string) {
+    setSections((prev) => prev.map((x) => (x.id === id ? { ...x, name } : x)));
+  }
+
+  function moveSection(id: string, delta: -1 | 1) {
+    setSections((prev) => {
+      const i = prev.findIndex((x) => x.id === id);
+      const j = i + delta;
+      if (i < 0 || j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  }
+
+  function removeSection(section: EstimateSection) {
+    const count = lineItems.filter((l) => l.sectionId === section.id).length;
+    if (count && !window.confirm(`Remove the "${section.name || "Untitled"}" section? Its ${count} line${count === 1 ? "" : "s"} move to Other work.`)) return;
+    setSections((prev) => prev.filter((x) => x.id !== section.id));
+    setLineItems((prev) => prev.map((l) => (l.sectionId === section.id ? { ...l, sectionId: undefined } : l)));
+    if (targetSection === section.id) setTargetSection("");
+  }
+
+  function addLine(sectionId?: string) {
+    setLineItems((prev) => [...prev, newLineItem({ sectionId }, data.company.defaultMarkup)]);
   }
 
   function applyDraft(mode: "replace" | "append", draft: PendingDraft) {
-    setLineItems((prev) =>
-      mode === "replace" ? draft.lineItems : [...prev.filter(hasContent), ...draft.lineItems]
-    );
+    if (mode === "replace") {
+      setSections(draft.sections);
+      setLineItems(draft.lineItems);
+    } else {
+      // Reuse sections with the same name; add the rest.
+      const idFor = new Map<string, string>();
+      const added: EstimateSection[] = [];
+      for (const s of draft.sections) {
+        const same = sections.find((x) => x.name.trim().toLowerCase() === s.name.trim().toLowerCase());
+        if (same) idFor.set(s.id, same.id);
+        else added.push(s);
+      }
+      setSections((prev) => [...prev, ...added]);
+      setLineItems((prev) => [
+        ...prev.filter(hasContent),
+        ...draft.lineItems.map((l) => (l.sectionId && idFor.has(l.sectionId) ? { ...l, sectionId: idFor.get(l.sectionId) } : l)),
+      ]);
+    }
     setAiMessage(draft.message);
     setPendingDraft(null);
   }
@@ -162,7 +235,6 @@ export function EstimateBuilder({
           description: aiPrompt,
           trade,
           markupPercent: data.company.defaultMarkup,
-          pricebook: data.pricebook,
         }),
       });
       const json = await res.json();
@@ -170,6 +242,7 @@ export function EstimateBuilder({
       if (!jobTitle.trim()) setJobTitle(aiPrompt.trim().split(/[.\n]/)[0].slice(0, 80));
       const draft: PendingDraft = {
         lineItems: json.lineItems,
+        sections: json.sections ?? [],
         message: `${json.summary}${json.source === "openai" ? " (AI)" : ""}`,
       };
       if (draft.lineItems.length === 0) {
@@ -207,6 +280,7 @@ export function EstimateBuilder({
       trade,
       status: nextStatus || status,
       lineItems: lineItems.filter(hasContent),
+      sections: sections.map((x) => ({ ...x, name: x.name.trim() || "Untitled section" })),
       taxPercent,
       notes,
       validUntil,
@@ -215,28 +289,63 @@ export function EstimateBuilder({
     setBusy(false);
     if (!saved) return null;
     setStatus(saved.status);
+    setSavedSnapshot(formSnapshot);
     if (!existing) router.replace(`/estimates/${saved.id}`);
     else flash("Saved");
     return saved;
+  }
+
+  function pdfOptions(saved: Estimate): PdfOptions {
+    return {
+      kind: "Estimate",
+      number: saved.number,
+      company: data.company,
+      customer: data.customers.find((c) => c.id === saved.customerId),
+      jobTitle: saved.jobTitle,
+      jobAddress: saved.jobAddress,
+      lineItems: saved.lineItems,
+      sections: saved.sections,
+      taxPercent: saved.taxPercent,
+      taxableCategories: saved.taxableCategories,
+      notes: saved.notes,
+      dateLabel: "Valid until",
+      dateValue: saved.validUntil,
+    };
   }
 
   async function handlePdf() {
     const saved = await save();
     if (!saved) return; // don't print an old version when the save failed
     const { downloadDocumentPdf } = await import("@/lib/pdf");
-    downloadDocumentPdf({
-      kind: "Estimate",
-      number: saved.number,
-      company: data.company,
-      customer,
-      jobTitle: saved.jobTitle,
-      jobAddress: saved.jobAddress,
-      lineItems: saved.lineItems,
-      taxPercent: saved.taxPercent,
-      notes: saved.notes,
-      dateLabel: "Valid until",
-      dateValue: saved.validUntil,
-    });
+    downloadDocumentPdf(pdfOptions(saved));
+  }
+
+  async function handleSend() {
+    const saved = await save();
+    if (saved) setSendPdf(pdfOptions(saved));
+  }
+
+  async function handleDeposit() {
+    if (!existing) return;
+    if (depositInvoice) {
+      router.push(`/invoices/${depositInvoice.id}`);
+      return;
+    }
+    const answer = window.prompt(
+      "Deposit as a percent of the estimate total:",
+      String(data.company.depositPercent)
+    );
+    if (answer === null) return;
+    const percent = Number(answer.replace("%", "").trim());
+    if (!(percent > 0 && percent <= 100)) {
+      setError("Enter a deposit between 1 and 100 percent.");
+      return;
+    }
+    if (!(await save())) return;
+    setBusy(true);
+    const inv = await safe(() => requestDeposit(existing.id, percent), "Deposit invoice created");
+    setBusy(false);
+    if (inv) router.push(`/invoices/${inv.id}`);
   }
 
   async function handleConvert() {
@@ -262,7 +371,8 @@ export function EstimateBuilder({
 
   async function handleDelete() {
     if (!existing) return;
-    const extra = invoice ? ` Its invoice ${invoice.number} will be kept.` : "";
+    const kept = [depositInvoice?.number, invoice?.number].filter(Boolean).join(" and ");
+    const extra = kept ? ` Its invoice${kept.includes(" and ") ? "s" : ""} ${kept} will be kept.` : "";
     if (!window.confirm(`Delete ${existing.number} (${existing.jobTitle})? This can't be undone.${extra}`)) return;
     setBusy(true);
     const ok = await safe(() => deleteEstimate(existing.id), "Estimate deleted");
@@ -280,6 +390,10 @@ export function EstimateBuilder({
             <Button type="button" variant="outline" className="h-11 rounded-xl" disabled={busy} onClick={handlePdf}>
               <FileDown className="size-4" />
               PDF
+            </Button>
+            <Button type="button" variant="outline" className="h-11 rounded-xl" disabled={busy} onClick={handleSend}>
+              <Send className="size-4" />
+              Send
             </Button>
             <Button
               type="button"
@@ -482,36 +596,104 @@ export function EstimateBuilder({
           </section>
 
           <section className="rounded-3xl border border-border bg-white/70 p-4 sm:p-5">
-            <div className="mb-3 flex items-center justify-between gap-2">
-              <h2 className="font-display text-lg text-foreground">Line items</h2>
-              <Button
-                type="button"
-                variant="outline"
-                className="h-11 rounded-xl"
-                onClick={() =>
-                  setLineItems((prev) => [...prev, newLineItem({}, data.company.defaultMarkup)])
-                }
-              >
-                <Plus className="size-4" />
-                Add line
-              </Button>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="font-display text-lg text-foreground">Line items</h2>
+                <p className="text-xs text-muted-foreground">
+                  {sections.length
+                    ? "Customers see each section's name and total, not the lines inside."
+                    : "Add sections (Demo, Framing…) to show customers a total per section."}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Button type="button" variant="outline" className="h-11 rounded-xl" onClick={addSection}>
+                  <FolderPlus className="size-4" />
+                  Add section
+                </Button>
+                {sections.length === 0 ? (
+                  <Button type="button" variant="outline" className="h-11 rounded-xl" onClick={() => addLine()}>
+                    <Plus className="size-4" />
+                    Add line
+                  </Button>
+                ) : null}
+              </div>
             </div>
 
-            {lineItems.length === 0 ? (
+            {lineItems.length === 0 && sections.length === 0 ? (
               <p className="rounded-2xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
                 No lines yet. Add one, pick from the pricebook, or draft from a description.
               </p>
-            ) : (
+            ) : sections.length === 0 ? (
               <div className="space-y-3">
                 {lineItems.map((item, index) => (
                   <LineItemCard
                     key={item.id}
                     item={item}
                     index={index}
+                    sections={sections}
                     onChange={(patch) => updateLine(item.id, patch)}
                     onRemove={() => setLineItems((prev) => prev.filter((x) => x.id !== item.id))}
                   />
                 ))}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {groupBySection(lineItems, sections).map((group, gi, all) => {
+                  const section = sections.find((x) => x.id === group.id);
+                  return (
+                    <div key={group.id || "other"} className="rounded-2xl border border-brand/20 bg-brand-muted/40 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {section ? (
+                          <Input
+                            aria-label="Section name"
+                            className="h-11 min-w-0 basis-full rounded-xl bg-white font-semibold sm:basis-0 sm:flex-1"
+                            value={section.name}
+                            placeholder="Section name (e.g. Framing)"
+                            onChange={(e) => renameSection(section.id, e.target.value)}
+                          />
+                        ) : (
+                          <p className="flex-1 px-1 font-semibold text-foreground">Other work</p>
+                        )}
+                        <span className="ml-auto px-1 text-sm font-semibold tabular-nums sm:ml-0">{formatCurrency(group.total)}</span>
+                        {section ? (
+                          <div className="flex">
+                            <Button type="button" variant="ghost" size="icon" className="size-10" disabled={gi === 0} onClick={() => moveSection(section.id, -1)} aria-label="Move section up">
+                              <ArrowUp className="size-4" />
+                            </Button>
+                            <Button type="button" variant="ghost" size="icon" className="size-10" disabled={gi >= sections.length - 1 || !all[gi + 1]?.id} onClick={() => moveSection(section.id, 1)} aria-label="Move section down">
+                              <ArrowDown className="size-4" />
+                            </Button>
+                            <Button type="button" variant="ghost" size="icon" className="size-10 text-rose-700" onClick={() => removeSection(section)} aria-label="Remove section">
+                              <Trash2 className="size-4" />
+                            </Button>
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="mt-3 space-y-3">
+                        {group.lines.map((item) => (
+                          <LineItemCard
+                            key={item.id}
+                            item={item}
+                            index={lineItems.indexOf(item)}
+                            sections={sections}
+                            onChange={(patch) => updateLine(item.id, patch)}
+                            onRemove={() => setLineItems((prev) => prev.filter((x) => x.id !== item.id))}
+                          />
+                        ))}
+                      </div>
+                      <Button type="button" variant="ghost" className="mt-2 h-10 rounded-xl text-brand" onClick={() => addLine(section?.id)}>
+                        <Plus className="size-4" />
+                        Add line{section?.name ? ` to ${section.name}` : ""}
+                      </Button>
+                    </div>
+                  );
+                })}
+                {sections.length > 0 && !lineItems.some((l) => !l.sectionId) ? (
+                  <Button type="button" variant="ghost" className="h-10 rounded-xl text-muted-foreground" onClick={() => addLine()}>
+                    <Plus className="size-4" />
+                    Add a line outside sections
+                  </Button>
+                ) : null}
               </div>
             )}
           </section>
@@ -527,7 +709,7 @@ export function EstimateBuilder({
                 <dd className="tabular-nums">{formatCurrency(totals.sub)}</dd>
               </div>
               <div className="flex justify-between">
-                <dt>Tax ({taxPercent}%)</dt>
+                <dt>Tax ({taxPercent}% on {describeTaxable(taxable)})</dt>
                 <dd className="tabular-nums">{formatCurrency(totals.tax)}</dd>
               </div>
             </dl>
@@ -543,6 +725,20 @@ export function EstimateBuilder({
                   <Copy className="size-4" />
                   Duplicate
                 </Button>
+                {!invoice || depositInvoice ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-11 rounded-xl border-white/20 bg-transparent text-brand-foreground hover:bg-white/10"
+                    disabled={busy}
+                    onClick={handleDeposit}
+                  >
+                    <HandCoins className="size-4" />
+                    {depositInvoice
+                      ? `View deposit ${depositInvoice.number}`
+                      : `Request deposit (${data.company.depositPercent}%)`}
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   className="h-11 rounded-xl bg-attention text-foreground hover:bg-attention/90"
@@ -550,7 +746,11 @@ export function EstimateBuilder({
                   onClick={handleConvert}
                 >
                   <Receipt className="size-4" />
-                  {invoice ? `View invoice ${invoice.number}` : "Convert to invoice"}
+                  {invoice
+                    ? `View invoice ${invoice.number}`
+                    : depositInvoice
+                      ? "Create final invoice"
+                      : "Convert to invoice"}
                 </Button>
                 <Button
                   type="button"
@@ -568,6 +768,22 @@ export function EstimateBuilder({
           <section className="rounded-3xl border border-border bg-white/70 p-4">
             <h2 className="font-display text-lg text-foreground">Pricebook</h2>
             <p className="text-xs text-muted-foreground">Tap an item to add it as a line.</p>
+            {sections.length ? (
+              <div className="mt-3 space-y-1">
+                <Label htmlFor="pb-target" className="text-xs text-muted-foreground">Add to section</Label>
+                <Select value={targetSection} onValueChange={(v) => setTargetSection((v as string) ?? "")}>
+                  <SelectTrigger id="pb-target" className="h-11 rounded-xl">
+                    <SelectValue>{(v: string) => sections.find((x) => x.id === v)?.name || (v ? "Untitled section" : "Other work")}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {sections.map((x) => (
+                      <SelectItem key={x.id} value={x.id}>{x.name || "Untitled section"}</SelectItem>
+                    ))}
+                    <SelectItem value="">Other work</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
             <Input
               className="mt-3 h-11 rounded-xl"
               placeholder="Search items…"
@@ -618,6 +834,24 @@ export function EstimateBuilder({
         </Button>
       </div>
 
+      {sendPdf && existing ? (
+        <SendDialog
+          open
+          onOpenChange={(open) => !open && setSendPdf(null)}
+          documentType="estimate"
+          documentId={existing.id}
+          pdf={sendPdf}
+          onSent={() => {
+            // The server marked a draft as sent; keep the form in step so the
+            // next Save doesn't write "draft" back.
+            if (status === "draft") {
+              setStatus("sent");
+              setSavedSnapshot(snapshotWith("sent"));
+            }
+          }}
+        />
+      ) : null}
+
       {notice ? (
         <div
           role="status"
@@ -650,11 +884,13 @@ function Field({
 function LineItemCard({
   item,
   index,
+  sections,
   onChange,
   onRemove,
 }: {
   item: LineItem;
   index: number;
+  sections: EstimateSection[];
   onChange: (patch: Partial<LineItem>) => void;
   onRemove: () => void;
 }) {
@@ -728,6 +964,21 @@ function LineItemCard({
             onValueChange={(markupPercent) => onChange({ markupPercent })}
           />
         </Field>
+        {sections.length ? (
+          <Field label="Section">
+            <Select value={item.sectionId ?? ""} onValueChange={(v) => onChange({ sectionId: (v as string) || undefined })}>
+              <SelectTrigger className="h-11 w-full rounded-xl bg-white" aria-label="Section">
+                <SelectValue>{(v: string) => sections.find((x) => x.id === v)?.name || (v ? "Untitled section" : "Other work")}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {sections.map((x) => (
+                  <SelectItem key={x.id} value={x.id}>{x.name || "Untitled section"}</SelectItem>
+                ))}
+                <SelectItem value="">Other work</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+        ) : null}
         <div className="flex min-w-0 flex-col justify-end rounded-xl bg-white/80 px-3 py-1.5 text-right">
           <span className="text-xs text-muted-foreground">
             {formatCurrency(price)} / {item.unit || "unit"}

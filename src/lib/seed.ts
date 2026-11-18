@@ -1,4 +1,14 @@
-import type { AppData, Estimate, Invoice, LineItem, PricebookItem, ScheduleBlock } from "./types";
+import type {
+  AppData,
+  CompanySettings,
+  Estimate,
+  EstimateSection,
+  Invoice,
+  LineItem,
+  PricebookItem,
+  ScheduleBlock,
+} from "./types";
+import { documentTotals } from "./types";
 import { dateOnlyFromToday } from "./utils";
 
 export const SEED_PRICEBOOK: PricebookItem[] = [
@@ -374,7 +384,7 @@ export const SEED_PRICEBOOK: PricebookItem[] = [
 ];
 
 
-export const DEFAULT_COMPANY = {
+export const DEFAULT_COMPANY: CompanySettings = {
   name: "F&G Home Maintenance",
   email: "estimates@fandg-llc.com",
   phone: "(231) 555-0142",
@@ -384,6 +394,9 @@ export const DEFAULT_COMPANY = {
   defaultTax: 6,
   terms:
     "Estimate valid for 30 days. 50% deposit due on acceptance. Balance due on completion. Change orders billed separately. Materials subject to supplier price changes.",
+  // Starting point only: confirm what's taxable with your accountant.
+  taxableCategories: ["material"],
+  depositPercent: 50,
 };
 
 // ---------------------------------------------------------------------------
@@ -463,7 +476,8 @@ export function createSeedData(now: Date = new Date()): AppData {
     status: Estimate["status"],
     lineItems: LineItem[],
     notes: string,
-    ageDays: number
+    ageDays: number,
+    sections: EstimateSection[] = []
   ): Estimate => ({
     id: `est-${n}`,
     number: `EST-${1000 + n}`,
@@ -473,7 +487,9 @@ export function createSeedData(now: Date = new Date()): AppData {
     trade,
     status,
     lineItems,
+    sections,
     taxPercent: 6,
+    taxableCategories: ["material"],
     notes,
     validUntil: dateOnlyFromToday(30 - ageDays, now),
     createdAt: daysAgoIso(ageDays, now),
@@ -487,12 +503,18 @@ export function createSeedData(now: Date = new Date()): AppData {
       li("e1-3", "pb-disposal", 1),
     ], "Includes haul-away of old faucet and disposal.", 3),
     est(2, "cust-3", "Deck rebuild 12x16", "carpentry", "accepted", [
-      li("e2-1", "pb-carp-labor", 24),
-      li("e2-2", "pb-deck-board", 48),
-      li("e2-3", "pb-joist-hanger", 26),
-      li("e2-4", "pb-2x4", 20, { description: "2x8 PT joist 12'", unitCost: 18.75 }),
-      li("e2-5", "pb-dumpster", 1),
-    ], "Removes existing deck. Railing not included.", 10),
+      li("e2-0", "pb-carp-labor", 6, { description: "Carpenter labor — tear-off", sectionId: "s2-demo" }),
+      li("e2-5", "pb-dumpster", 1, { sectionId: "s2-demo" }),
+      li("e2-1", "pb-carp-labor", 10, { description: "Carpenter labor — framing", sectionId: "s2-frame" }),
+      li("e2-4", "pb-2x4", 20, { description: "2x8 PT joist 12'", unitCost: 18.75, sectionId: "s2-frame" }),
+      li("e2-3", "pb-joist-hanger", 26, { sectionId: "s2-frame" }),
+      li("e2-6", "pb-carp-labor", 8, { description: "Carpenter labor — decking", sectionId: "s2-deck" }),
+      li("e2-2", "pb-deck-board", 48, { sectionId: "s2-deck" }),
+    ], "Removes existing deck. Railing not included.", 10, [
+      { id: "s2-demo", name: "Demo & haul-away" },
+      { id: "s2-frame", name: "Framing" },
+      { id: "s2-deck", name: "Decking" },
+    ]),
     est(3, "cust-5", "Basement outlets + recessed lighting", "electrical", "draft", [
       li("e3-1", "pb-elec-labor", 10),
       li("e3-2", "pb-outlet", 6),
@@ -528,14 +550,18 @@ export function createSeedData(now: Date = new Date()): AppData {
       li("e7-4", "pb-hvac-labor", 1),
     ], "", 30),
     est(8, "cust-1", "Guest bath refresh", "general", "accepted", [
-      li("e8-1", "pb-gc-labor", 14),
-      li("e8-2", "pb-toilet", 1),
-      li("e8-3", "pb-plumb-labor", 2),
-      li("e8-4", "pb-gfci", 1),
-      li("e8-5", "pb-trim", 36),
-      li("e8-6", "pb-paint-gal", 2),
-      li("e8-7", "pb-cleanup", 1),
-    ], "Tile not included — allowance to be agreed.", 5),
+      li("e8-2", "pb-toilet", 1, { sectionId: "s8-plumb" }),
+      li("e8-3", "pb-plumb-labor", 2, { sectionId: "s8-plumb" }),
+      li("e8-4", "pb-gfci", 1, { sectionId: "s8-elec" }),
+      li("e8-1", "pb-gc-labor", 14, { sectionId: "s8-finish" }),
+      li("e8-5", "pb-trim", 36, { sectionId: "s8-finish" }),
+      li("e8-6", "pb-paint-gal", 2, { sectionId: "s8-finish" }),
+      li("e8-7", "pb-cleanup", 1, { sectionId: "s8-finish" }),
+    ], "Tile not included — allowance to be agreed.", 5, [
+      { id: "s8-plumb", name: "Plumbing" },
+      { id: "s8-elec", name: "Electrical" },
+      { id: "s8-finish", name: "Carpentry & finish" },
+    ]),
     est(9, "cust-2", "Punch list — units 2A, 3C", "general", "converted", [
       li("e9-1", "pb-gc-labor", 9),
       li("e9-2", "pb-door", 1),
@@ -555,13 +581,17 @@ export function createSeedData(now: Date = new Date()): AppData {
     return {
       id: `inv-${n}`,
       number: `INV-${2000 + n}`,
+      kind: "final",
       estimateId,
       customerId: e.customerId,
       jobTitle: e.jobTitle,
       jobAddress: e.jobAddress,
       status,
       lineItems: e.lineItems.map((l) => ({ ...l, id: `${l.id}-i` })),
+      sections: e.sections,
       taxPercent: e.taxPercent,
+      taxableCategories: e.taxableCategories,
+      depositApplied: 0,
       notes: e.notes,
       dueDate: dateOnlyFromToday(dueInDays, now),
       createdAt: daysAgoIso(14 - dueInDays, now),
@@ -569,16 +599,50 @@ export function createSeedData(now: Date = new Date()): AppData {
     };
   };
 
+  // A paid 50% deposit on the accepted deck job.
+  const deck = estimates.find((x) => x.id === "est-2")!;
+  const deckDeposit = Math.round(documentTotals(deck).total * 0.5 * 100) / 100;
+  const deposit: Invoice = {
+    id: "inv-4",
+    number: "INV-2004",
+    kind: "deposit",
+    estimateId: deck.id,
+    customerId: deck.customerId,
+    jobTitle: deck.jobTitle,
+    jobAddress: deck.jobAddress,
+    status: "paid",
+    lineItems: [
+      {
+        id: "dep-4",
+        description: `Deposit (50%) for ${deck.number} — ${deck.jobTitle}`,
+        category: "other",
+        quantity: 1,
+        unit: "ea",
+        unitCost: deckDeposit,
+        markupPercent: 0,
+      },
+    ],
+    sections: [],
+    taxPercent: 0,
+    taxableCategories: [],
+    depositApplied: 0,
+    notes: "Deposit due on acceptance. Applied to the final invoice.",
+    dueDate: dateOnlyFromToday(-8, now),
+    createdAt: daysAgoIso(9, now),
+    paidAt: daysAgoIso(7, now),
+  };
+
   const invoices: Invoice[] = [
     inv(1, "est-5", "sent", 7),
     inv(2, "est-7", "paid", -12, 15),
     inv(3, "est-9", "overdue", -10),
+    deposit,
   ];
 
   const scheduleBlocks: ScheduleBlock[] = [
-    { id: "blk-1", estimateId: "est-2", lineItemIds: ["e2-1"], title: "Deck rebuild 12x16: demo + framing", start: weekSlot(now, 1, 8), durationMinutes: 480 },
-    { id: "blk-2", estimateId: "est-2", lineItemIds: ["e2-1"], title: "Deck rebuild 12x16: decking", start: weekSlot(now, 2, 8), durationMinutes: 480 },
-    { id: "blk-3", estimateId: "est-2", lineItemIds: ["e2-1"], title: "Deck rebuild 12x16: stairs + punch", start: weekSlot(now, 3, 8), durationMinutes: 480 },
+    { id: "blk-1", estimateId: "est-2", lineItemIds: ["e2-0"], title: "Deck rebuild 12x16: tear-off", start: weekSlot(now, 1, 8), durationMinutes: 480 },
+    { id: "blk-2", estimateId: "est-2", lineItemIds: ["e2-1"], title: "Deck rebuild 12x16: framing", start: weekSlot(now, 2, 8), durationMinutes: 480 },
+    { id: "blk-3", estimateId: "est-2", lineItemIds: ["e2-6"], title: "Deck rebuild 12x16: decking", start: weekSlot(now, 3, 8), durationMinutes: 480 },
     { id: "blk-4", estimateId: "est-1", title: "Kitchen faucet + disposal swap", start: weekSlot(now, 4, 13), durationMinutes: 180 },
     { id: "blk-5", estimateId: "est-8", title: "Guest bath refresh", start: weekSlot(now, 7, 9), durationMinutes: 480 },
     { id: "blk-6", estimateId: "est-8", lineItemIds: ["e8-3"], title: "Guest bath refresh: Plumber labor", start: weekSlot(now, 8, 9), durationMinutes: 120 },
@@ -591,6 +655,6 @@ export function createSeedData(now: Date = new Date()): AppData {
     estimates,
     invoices,
     scheduleBlocks,
-    counters: { estimate: 1009, invoice: 2003 },
+    counters: { estimate: 1009, invoice: 2004 },
   };
 }

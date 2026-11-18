@@ -30,7 +30,10 @@ export const lineItemSchema = z.object({
   unit: shortText(16),
   unitCost: finite.min(0).max(10_000_000),
   markupPercent: finite.min(-100).max(1000),
+  sectionId: id.optional(),
 });
+
+export const sectionSchema = z.object({ id, name: shortText(80) });
 
 export const companySchema = z.object({
   name: shortText(160).min(1, "Company name is required"),
@@ -41,6 +44,8 @@ export const companySchema = z.object({
   defaultMarkup: finite.min(-100).max(1000),
   defaultTax: finite.min(0).max(100),
   terms: shortText(5000),
+  taxableCategories: z.array(CATEGORY).max(4).transform((c) => [...new Set(c)]),
+  depositPercent: finite.min(0).max(100),
 });
 
 export const customerSchema = z.object({
@@ -70,6 +75,7 @@ export const estimateSchema = z.object({
   trade: TRADE,
   status: z.enum(["draft", "sent", "accepted", "declined", "converted"]),
   lineItems: z.array(lineItemSchema).max(300),
+  sections: z.array(sectionSchema).max(50).default([]),
   taxPercent: finite.min(0).max(100),
   notes: shortText(5000),
   validUntil: dateOnly,
@@ -102,3 +108,14 @@ export type PricebookItemInput = z.infer<typeof pricebookItemSchema>;
 export type EstimateInput = z.infer<typeof estimateSchema>;
 export type InvoiceUpdateInput = z.infer<typeof invoiceUpdateSchema>;
 export type ScheduleBlockInput = z.infer<typeof scheduleBlockSchema>;
+
+export const sendDocumentSchema = z.object({
+  documentType: z.enum(["estimate", "invoice"]),
+  documentId: id,
+  to: z.email("Enter a valid email address").max(254),
+  subject: shortText(200).min(1, "Add a subject"),
+  message: shortText(5000),
+  /** The PDF, made in the browser, as base64. */
+  pdfBase64: z.string().min(100).max(1_300_000, "That PDF is too large to email"),
+});
+export type SendDocumentInput = z.infer<typeof sendDocumentSchema>;

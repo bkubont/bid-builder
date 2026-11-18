@@ -23,7 +23,7 @@ import {
   uniqueIndex,
   varchar,
 } from "drizzle-orm/mysql-core";
-import type { LineItem } from "@/lib/types";
+import type { EstimateSection, LineCategory, LineItem } from "@/lib/types";
 
 /** JSON column that works on both MySQL (returns objects) and MariaDB (returns text). */
 const jsonColumn = <T>(name: string) =>
@@ -172,6 +172,9 @@ export const companySettings = mysqlTable("company_settings", {
   defaultMarkup: percent("default_markup").notNull().default(20),
   defaultTax: percent("default_tax").notNull().default(6),
   terms: text("terms").notNull(),
+  /** null = materials only (the default). */
+  taxableCategories: jsonColumn<LineCategory[] | null>("taxable_categories"),
+  depositPercent: percent("deposit_percent").notNull().default(50),
   estimateCounter: int("estimate_counter").notNull().default(1000),
   invoiceCounter: int("invoice_counter").notNull().default(2000),
   updatedAt: updatedAt(),
@@ -232,7 +235,10 @@ export const estimates = mysqlTable(
     trade: mysqlEnum("trade", TRADES).notNull(),
     status: mysqlEnum("status", ["draft", "sent", "accepted", "declined", "converted"]).notNull(),
     lineItems: jsonColumn<LineItem[]>("line_items").notNull(),
+    sections: jsonColumn<EstimateSection[] | null>("sections"),
     taxPercent: percent("tax_percent").notNull(),
+    /** null on documents made before this setting existed = tax every line. */
+    taxableCategories: jsonColumn<LineCategory[] | null>("taxable_categories"),
     notes: text("notes").notNull(),
     validUntil: date("valid_until", { mode: "string" }).notNull(),
     createdAt: createdAt(),
@@ -252,16 +258,17 @@ export const invoices = mysqlTable(
       .notNull()
       .references(() => companies.id, { onDelete: "cascade" }),
     number: varchar("number", { length: 32 }).notNull(),
-    // One invoice per estimate: a double tap can't bill twice.
-    estimateId: id("estimate_id")
-      .unique()
-      .references(() => estimates.id, { onDelete: "set null" }),
+    kind: mysqlEnum("kind", ["final", "deposit"]).notNull().default("final"),
+    estimateId: id("estimate_id").references(() => estimates.id, { onDelete: "set null" }),
     customerId: id("customer_id").references(() => customers.id, { onDelete: "set null" }),
     jobTitle: varchar("job_title", { length: 200 }).notNull(),
     jobAddress: varchar("job_address", { length: 255 }).notNull().default(""),
     status: mysqlEnum("status", ["draft", "sent", "paid", "overdue"]).notNull(),
     lineItems: jsonColumn<LineItem[]>("line_items").notNull(),
+    sections: jsonColumn<EstimateSection[] | null>("sections"),
     taxPercent: percent("tax_percent").notNull(),
+    taxableCategories: jsonColumn<LineCategory[] | null>("taxable_categories"),
+    depositApplied: decimal("deposit_applied", { precision: 12, scale: 2, mode: "number" }).notNull().default(0),
     notes: text("notes").notNull(),
     dueDate: date("due_date", { mode: "string" }).notNull(),
     paidAt: datetime("paid_at", { mode: "date", fsp: 3 }),
@@ -270,6 +277,8 @@ export const invoices = mysqlTable(
   },
   (t) => [
     uniqueIndex("invoice_company_number_uq").on(t.companyId, t.number),
+    // At most one deposit and one final invoice per estimate: a double tap can't bill twice.
+    uniqueIndex("invoice_estimate_kind_uq").on(t.estimateId, t.kind),
     index("invoice_company_idx").on(t.companyId, t.createdAt),
   ]
 );
@@ -305,4 +314,22 @@ export const aiUsage = mysqlTable(
     count: int("count").notNull().default(0),
   },
   (t) => [primaryKey({ columns: [t.companyId, t.day] })]
+);
+
+/** Emails sent from the app, for the daily limit and a record of what went out. */
+export const emailLog = mysqlTable(
+  "email_log",
+  {
+    id: id().primaryKey(),
+    companyId: id("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    sentBy: id("sent_by").references(() => user.id, { onDelete: "set null" }),
+    documentType: mysqlEnum("document_type", ["estimate", "invoice"]).notNull(),
+    documentId: id("document_id").notNull(),
+    toEmail: varchar("to_email", { length: 254 }).notNull(),
+    providerId: varchar("provider_id", { length: 100 }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("email_log_company_idx").on(t.companyId, t.createdAt)]
 );

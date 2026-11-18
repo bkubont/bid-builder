@@ -7,7 +7,7 @@ import { EmptyState } from "@/components/empty-state";
 import { EstimateStatusBadge } from "@/components/status-badge";
 import { ButtonLink } from "@/components/ui/button-link";
 import { useStore } from "@/lib/store";
-import { grandTotal } from "@/lib/types";
+import { documentTotals } from "@/lib/types";
 import { formatCurrency, formatDate } from "@/lib/utils";
 
 export default function EstimatesPage() {
@@ -85,7 +85,7 @@ export default function EstimatesPage() {
                       {formatDate(estimate.updatedAt)}
                     </p>
                     <p className="mt-1 text-right font-semibold tabular-nums md:mt-0">
-                      {formatCurrency(grandTotal(estimate.lineItems, estimate.taxPercent))}
+                      {formatCurrency(documentTotals(estimate).total)}
                     </p>
                     <div className="hidden md:block">
                       <EstimateStatusBadge status={estimate.status} />

@@ -15,6 +15,7 @@ import { getAuth } from "@/lib/auth";
 import * as data from "./data";
 import { UserError } from "./data";
 import { checkSetupCode, createLogin, ownerEmail, setPasswordFor } from "./accounts";
+import { emailConfigured, sendEmail } from "./email";
 import { requireMe, requireOwner } from "./session";
 import {
   companySchema,
@@ -24,6 +25,7 @@ import {
   invoiceUpdateSchema,
   pricebookItemSchema,
   scheduleBlockSchema,
+  sendDocumentSchema,
 } from "./validation";
 
 export type ActionResult<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -117,6 +119,61 @@ export async function convertEstimateAction(id: unknown) {
   return run(async () => {
     const me = await requireMe();
     return data.convertEstimateToInvoice(getDb(), me.companyId, idSchema.parse(id));
+  });
+}
+
+export async function requestDepositAction(estimateId: unknown, percent: unknown) {
+  return run(async () => {
+    const me = await requireMe();
+    return data.createDepositInvoice(
+      getDb(),
+      me.companyId,
+      idSchema.parse(estimateId),
+      z.number().finite().parse(percent)
+    );
+  });
+}
+
+const EMAILS_PER_DAY = Number(process.env.EMAIL_DAILY_LIMIT || 100);
+
+/** Email an estimate or invoice PDF to the customer. */
+export async function sendDocumentAction(input: unknown) {
+  return run(async () => {
+    const me = await requireMe();
+    if (!emailConfigured()) throw new UserError("Sending email isn't set up yet. Use Share instead.");
+    const msg = sendDocumentSchema.parse(input);
+    const db = getDb();
+    const doc = await data.getDocumentForEmail(db, me.companyId, msg.documentType, msg.documentId);
+    if (!doc) throw new UserError("That document was deleted on another device.");
+    if (!msg.pdfBase64.startsWith("JVBER")) throw new UserError("That attachment isn't a PDF.");
+    const snapshot = await data.loadSnapshot(db, me.companyId);
+    // Take a slot under the daily limit first, so parallel sends can't exceed it.
+    const logId = await data.reserveEmailSlot(
+      db,
+      me.companyId,
+      { sentBy: me.id, documentType: msg.documentType, documentId: msg.documentId, toEmail: msg.to },
+      EMAILS_PER_DAY
+    );
+    let sent: { id?: string };
+    try {
+      sent = await sendEmail({
+        to: msg.to,
+        subject: msg.subject,
+        text: msg.message,
+        replyTo: snapshot.company.email || me.email,
+        fromName: snapshot.company.name,
+        attachment: { filename: `${doc.number}.pdf`, base64: msg.pdfBase64 },
+      });
+    } catch {
+      await data.releaseEmailSlot(db, me.companyId, logId);
+      throw new UserError("The email couldn't be sent. Check the address and try again, or use Share.");
+    }
+    await data.confirmEmailSent(db, me.companyId, logId, {
+      documentType: msg.documentType,
+      documentId: msg.documentId,
+      providerId: sent.id,
+    });
+    return null;
   });
 }
 

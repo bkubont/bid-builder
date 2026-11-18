@@ -6,11 +6,14 @@ Live target: `https://estimate.fandg-llc.com`
 
 ## Features
 
-- **Estimates** with materials/labor lines, markup, tax, PDF export
+- **Estimates** with materials/labor lines grouped into sections, markup, tax, PDF export. Customer estimates show each section's name and total only.
+- **Invoices** show every line under section headings; **deposit invoices** bill a share up front and the final invoice subtracts it
+- **Sales tax by category** (e.g. materials only), kept per document so changing the setting never changes what you've sent
+- **Send** estimates and invoices: Share to Mail/Messages from a tablet or phone, or email straight from the app once Resend is set up
 - **Pricebook** for reusable rates (powers manual adds and drafts)
 - **AI / quick draft** from a job description (`OPENAI_API_KEY` optional; local pricebook matching otherwise). Asks before replacing lines you've entered. Limited per company per day.
 - **Schedule** — week timeblocks; drag whole jobs or individual lines; duration matches labor hours
-- **Customers** and **invoices** (convert from an estimate; one invoice per estimate)
+- **Customers**, and invoices converted from an estimate (at most one deposit and one final invoice per estimate)
 - **Logins and team** — email + password; Owners manage company settings and invite people
 - **PWA** manifest + service worker for home-screen install; pages you've opened stay viewable offline
 - Branding from Square This Up (blue `#0504AA` + gold `#E3AD36`)
@@ -37,7 +40,7 @@ Open [http://127.0.0.1:3847](http://127.0.0.1:3847). The seed creates `owner@exa
 
 1. **Database:** hPanel → Databases → MySQL Databases → create a database and a user.
 2. **Environment variables** (Node.js app settings), described in `.env.example`:
-   `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `OWNER_EMAIL`, `SETUP_CODE`, and optionally `OPENAI_API_KEY`.
+   `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `OWNER_EMAIL`, `SETUP_CODE`, and optionally `OPENAI_API_KEY`, `RESEND_API_KEY` + `EMAIL_FROM`.
 3. **Node.js 20.9 or newer.** Build command `npm run build`, start command `npm start`.
    `npm start` applies any new database migrations, then serves the app on the `PORT` Hostinger provides.
 4. **First visit:** the site opens `/setup`. Enter the setup code, your name, company name and a password. That creates the Owner account, and `/setup` locks itself.

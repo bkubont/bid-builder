@@ -1,4 +1,4 @@
-import type { LineCategory, LineItem, PricebookItem, Trade } from "./types";
+import type { EstimateSection, LineCategory, LineItem, PricebookItem, Trade } from "./types";
 import { v4 as uuid } from "uuid";
 
 export type DraftRequest = {
@@ -10,6 +10,8 @@ export type DraftRequest = {
 
 export type DraftResult = {
   lineItems: LineItem[];
+  /** Suggested sections (AI drafts only); lines point at them by sectionId. */
+  sections: EstimateSection[];
   source: "mock" | "openai";
   summary: string;
 };
@@ -126,6 +128,7 @@ export function mockDraftFromPricebook(req: DraftRequest): DraftResult {
 
   return {
     lineItems,
+    sections: [],
     source: "mock",
     summary:
       lineItems.length === 0
@@ -136,6 +139,7 @@ export function mockDraftFromPricebook(req: DraftRequest): DraftResult {
 }
 
 type AiItem = {
+  section?: unknown;
   pricebookItemId?: string | null;
   description?: unknown;
   category?: unknown;
@@ -144,9 +148,23 @@ type AiItem = {
   unitCost?: unknown;
 };
 
-/** Turn the model's JSON into safe line items. Pricebook prices win over the model's. */
-export function linesFromAi(items: AiItem[], req: DraftRequest): LineItem[] {
-  return items
+/**
+ * Turn the model's JSON into safe line items and sections.
+ * Pricebook prices win over the model's.
+ */
+export function linesFromAi(items: AiItem[], req: DraftRequest): { lineItems: LineItem[]; sections: EstimateSection[] } {
+  const sections: EstimateSection[] = [];
+  const sectionFor = (raw: unknown): string | undefined => {
+    const name = typeof raw === "string" ? raw.trim().slice(0, 80) : "";
+    if (!name) return undefined;
+    const found = sections.find((x) => x.name.toLowerCase() === name.toLowerCase());
+    if (found) return found.id;
+    if (sections.length >= 12) return undefined;
+    const section = { id: uuid(), name };
+    sections.push(section);
+    return section.id;
+  };
+  const lineItems = items
     .slice(0, 25)
     .map((raw): LineItem | null => {
       const match = raw.pricebookItemId
@@ -170,9 +188,13 @@ export function linesFromAi(items: AiItem[], req: DraftRequest): LineItem[] {
         unit: match?.unit ?? (String(raw.unit ?? "ea").slice(0, 12) || "ea"),
         unitCost,
         markupPercent: req.markupPercent,
+        sectionId: sectionFor(raw.section),
       };
     })
     .filter((x): x is LineItem => x !== null);
+  // Keep only sections that ended up with lines.
+  const used = new Set(lineItems.map((l) => l.sectionId));
+  return { lineItems, sections: sections.filter((x) => used.has(x.id)) };
 }
 
 /**
@@ -195,8 +217,8 @@ export async function draftWithOpenAI(req: DraftRequest): Promise<DraftResult | 
 
     const prompt = `You are an estimating assistant for a residential contractor.
 Given a job description and the contractor's pricebook, return JSON only:
-{"summary":"one short sentence","items":[{"pricebookItemId":"id or null","description":"string","category":"labor|material|equipment|other","quantity":number,"unit":"string","unitCost":number}]}
-Rules: use pricebook items wherever one fits (set pricebookItemId). Only invent a line when nothing in the pricebook fits, with a realistic cost. Use quantities stated in the description; otherwise estimate sensibly. Do not add other trades' labor unless the job needs it. Main trade: ${req.trade}.
+{"summary":"one short sentence","items":[{"section":"string","pricebookItemId":"id or null","description":"string","category":"labor|material|equipment|other","quantity":number,"unit":"string","unitCost":number}]}
+Rules: group lines into 2-6 sections named by phase of work as a contractor would list them for a homeowner (e.g. "Demo & haul-away", "Framing", "Finish"); a small job may use one section. Use pricebook items wherever one fits (set pricebookItemId). Only invent a line when nothing in the pricebook fits, with a realistic cost. Use quantities stated in the description; otherwise estimate sensibly. Do not add other trades' labor unless the job needs it. Main trade: ${req.trade}.
 Job description: ${req.description}
 Pricebook: ${JSON.stringify(catalog)}`;
 
@@ -228,11 +250,12 @@ Pricebook: ${JSON.stringify(catalog)}`;
 
     const parsed = JSON.parse(content) as { summary?: unknown; items?: unknown };
     const items = Array.isArray(parsed.items) ? (parsed.items as AiItem[]) : [];
-    const lineItems = linesFromAi(items, req);
+    const { lineItems, sections } = linesFromAi(items, req);
     if (lineItems.length === 0) return null;
 
     return {
       lineItems,
+      sections,
       source: "openai",
       summary:
         (typeof parsed.summary === "string" && parsed.summary.slice(0, 300)) ||
