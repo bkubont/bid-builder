@@ -101,7 +101,8 @@ export const scheduleBlockSchema = z.object({
 export const scheduleBlockPatchSchema = z
   .object({
     start: z.iso.datetime({ offset: true }).optional(),
-    durationMinutes: z.number().int().min(15).max(24 * 60).optional(),
+    // Same limit as creating a block, so a long whole-job block can still be edited.
+    durationMinutes: z.number().int().min(15).max(24 * 60 * 7).optional(),
     assignedUserId: id.nullable().optional(),
     title: shortText(255).min(1).optional(),
   })

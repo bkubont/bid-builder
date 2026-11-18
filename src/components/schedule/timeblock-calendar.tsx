@@ -31,19 +31,20 @@ import {
   hoursToMinutes,
   layoutLanes,
   lineHours,
+  MAX_BLOCK_MINUTES,
   resizedMinutes,
   scheduledLineIds,
   selectionHours,
   snapToQuarterHour,
+  visibleHourRange,
   type DragPayload,
 } from "@/lib/schedule";
 import { initials, personColor, personName } from "@/lib/team";
 import { cn, toDateOnly } from "@/lib/utils";
 
-const DAY_START_HOUR = 6;
-const DAY_END_HOUR = 20;
 const HOUR_HEIGHT = 64;
-const HOURS = Array.from({ length: DAY_END_HOUR - DAY_START_HOUR }, (_, i) => DAY_START_HOUR + i);
+type HourRange = { startHour: number; endHour: number };
+const hoursOf = (r: HourRange) => Array.from({ length: r.endHour - r.startHour }, (_, i) => r.startHour + i);
 
 type PersonFilter = "all" | "unassigned" | string;
 
@@ -88,6 +89,9 @@ export function TimeblockCalendar() {
   const visibleBlocks = data.scheduleBlocks.filter((b) =>
     person === "all" ? true : person === "unassigned" ? !b.assignedUserId : b.assignedUserId === person
   );
+  // 6am–8pm, stretched so early or late blocks are never hidden.
+  const range = visibleHourRange(visibleBlocks, days);
+  const HOURS = hoursOf(range);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -313,7 +317,7 @@ export function TimeblockCalendar() {
                     <div
                       key={hour}
                       className="absolute right-1 text-[10px] font-medium text-muted-foreground"
-                      style={{ top: (hour - DAY_START_HOUR) * HOUR_HEIGHT + 2 }}
+                      style={{ top: (hour - range.startHour) * HOUR_HEIGHT + 2 }}
                     >
                       {format(new Date(2000, 0, 1, hour), "ha")}
                     </div>
@@ -326,6 +330,7 @@ export function TimeblockCalendar() {
                     day={day}
                     blocks={visibleBlocks.filter((b) => isSameDay(new Date(b.start), day))}
                     team={data.team}
+                    range={range}
                     roomy={view === "day"}
                     onOpen={openBlock}
                     onResize={(block, durationMinutes) =>
@@ -452,6 +457,7 @@ function DayColumn({
   day,
   blocks,
   team,
+  range,
   roomy,
   onOpen,
   onResize,
@@ -459,14 +465,15 @@ function DayColumn({
   day: Date;
   blocks: ScheduleBlock[];
   team: TeamMember[];
+  range: HourRange;
   roomy: boolean;
   onOpen: (block: ScheduleBlock) => void;
   onResize: (block: ScheduleBlock, durationMinutes: number) => void;
 }) {
   return (
     <div className="relative border-r border-border last:border-r-0">
-      {HOURS.map((hour) => (
-        <div key={hour} className="absolute inset-x-0" style={{ top: (hour - DAY_START_HOUR) * HOUR_HEIGHT, height: HOUR_HEIGHT }}>
+      {hoursOf(range).map((hour) => (
+        <div key={hour} className="absolute inset-x-0" style={{ top: (hour - range.startHour) * HOUR_HEIGHT, height: HOUR_HEIGHT }}>
           <DropSlot day={day} hour={hour} minute={0} />
           <DropSlot day={day} hour={hour} minute={30} className="top-1/2" />
           <div className="pointer-events-none absolute inset-x-0 top-0 border-t border-border/70" />
@@ -481,6 +488,7 @@ function DayColumn({
           lane={lane}
           lanes={lanes}
           team={team}
+          range={range}
           roomy={roomy}
           onOpen={onOpen}
           onResize={onResize}
@@ -501,6 +509,7 @@ function ScheduledBlock({
   lane,
   lanes,
   team,
+  range,
   roomy,
   onOpen,
   onResize,
@@ -509,6 +518,7 @@ function ScheduledBlock({
   lane: number;
   lanes: number;
   team: TeamMember[];
+  range: HourRange;
   roomy: boolean;
   onOpen: (block: ScheduleBlock) => void;
   onResize: (block: ScheduleBlock, durationMinutes: number) => void;
@@ -521,12 +531,12 @@ function ScheduledBlock({
   });
 
   const start = new Date(block.start);
-  const minutesFromStart = (start.getHours() - DAY_START_HOUR) * 60 + start.getMinutes();
-  if (minutesFromStart < 0 || minutesFromStart >= (DAY_END_HOUR - DAY_START_HOUR) * 60) return null;
+  // The visible range always includes this block's start (visibleHourRange).
+  const minutesFromStart = Math.max(0, (start.getHours() - range.startHour) * 60 + start.getMinutes());
 
   const duration = previewMinutes ?? block.durationMinutes;
   const top = (minutesFromStart / 60) * HOUR_HEIGHT;
-  const maxMinutes = (DAY_END_HOUR - DAY_START_HOUR) * 60 - minutesFromStart;
+  const maxMinutes = (range.endHour - range.startHour) * 60 - minutesFromStart;
   const height = Math.max(28, (Math.min(duration, maxMinutes) / 60) * HOUR_HEIGHT);
   const end = addMinutes(start, duration);
   const color = personColor(block.assignedUserId, team);
@@ -585,11 +595,11 @@ function ScheduledBlock({
         }}
         onPointerMove={(e) => {
           if (resizeFrom.current === null) return;
-          setPreviewMinutes(resizedMinutes(block.durationMinutes, e.clientY - resizeFrom.current, HOUR_HEIGHT));
+          setPreviewMinutes(resizedMinutes(block.durationMinutes, e.clientY - resizeFrom.current, HOUR_HEIGHT, MAX_BLOCK_MINUTES));
         }}
         onPointerUp={(e) => {
           if (resizeFrom.current === null) return;
-          const next = resizedMinutes(block.durationMinutes, e.clientY - resizeFrom.current, HOUR_HEIGHT);
+          const next = resizedMinutes(block.durationMinutes, e.clientY - resizeFrom.current, HOUR_HEIGHT, MAX_BLOCK_MINUTES);
           resizeFrom.current = null;
           setPreviewMinutes(null);
           if (next !== block.durationMinutes) onResize(block, next);
@@ -617,7 +627,7 @@ function BlockDialog({
   estimate?: Estimate;
   team: TeamMember[];
   onClose: () => void;
-  onSave: (patch: { start: string; durationMinutes: number; assignedUserId: string | null; title: string }) => Promise<void>;
+  onSave: (patch: { start?: string; durationMinutes?: number; assignedUserId?: string | null; title?: string }) => Promise<void>;
   onDelete: () => Promise<void>;
 }) {
   const start = new Date(block.start);
@@ -641,13 +651,21 @@ function BlockDialog({
             const [y, m, d] = day.split("-").map(Number);
             const [hh, mm] = time.split(":").map(Number);
             if (!y || Number.isNaN(hh)) return;
+            // Send only what changed, so editing the person or title never trips over the length.
+            const patch: { start?: string; durationMinutes?: number; assignedUserId?: string | null; title?: string } = {};
+            const nextTitle = title.trim() || block.title;
+            if (nextTitle !== block.title) patch.title = nextTitle;
+            const nextStart = new Date(y, m - 1, d, hh, mm || 0).toISOString();
+            if (+new Date(nextStart) !== +new Date(block.start)) patch.start = nextStart;
+            const nextMinutes = Math.min(MAX_BLOCK_MINUTES, Math.max(15, Math.round((hours * 60) / 15) * 15));
+            if (nextMinutes !== block.durationMinutes) patch.durationMinutes = nextMinutes;
+            if ((assignee || null) !== (block.assignedUserId ?? null)) patch.assignedUserId = assignee || null;
+            if (Object.keys(patch).length === 0) {
+              onClose();
+              return;
+            }
             setBusy(true);
-            await onSave({
-              title: title.trim() || block.title,
-              start: new Date(y, m - 1, d, hh, mm || 0).toISOString(),
-              durationMinutes: Math.max(15, Math.round((hours * 60) / 15) * 15),
-              assignedUserId: assignee || null,
-            });
+            await onSave(patch);
             setBusy(false);
           }}
         >

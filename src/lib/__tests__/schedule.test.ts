@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layoutLanes, resizedMinutes } from "../schedule";
+import { layoutLanes, resizedMinutes, visibleHourRange } from "../schedule";
 import { initials, personColor, personName } from "../team";
 
 const at = (h: number, m = 0) => new Date(2026, 10, 20, h, m).toISOString();
@@ -32,7 +32,28 @@ describe("resizing", () => {
     expect(resizedMinutes(60, 16, 64)).toBe(75); // one quarter-hour = 16px
     expect(resizedMinutes(60, 23, 64)).toBe(75);
     expect(resizedMinutes(60, -200, 64)).toBe(15);
-    expect(resizedMinutes(60, 64 * 30, 64)).toBe(24 * 60);
+    expect(resizedMinutes(60, 64 * 30, 64, 24 * 60)).toBe(24 * 60);
+  });
+
+  it("doesn't shrink a long block when nudged", () => {
+    expect(resizedMinutes(2000, 16, 64)).toBe(2015);
+  });
+});
+
+describe("visible hours", () => {
+  const day = new Date(2026, 10, 20);
+  it("is 6am–8pm by default", () => {
+    expect(visibleHourRange([], [day])).toEqual({ startHour: 6, endHour: 20 });
+  });
+  it("stretches to show early and late blocks instead of hiding them", () => {
+    const early = { start: new Date(2026, 10, 20, 5, 15).toISOString(), durationMinutes: 60 };
+    const late = { start: new Date(2026, 10, 20, 20, 30).toISOString(), durationMinutes: 90 };
+    expect(visibleHourRange([early, late], [day])).toEqual({ startHour: 5, endHour: 22 });
+  });
+  it("ignores blocks on other days and caps at midnight", () => {
+    const otherDay = { start: new Date(2026, 10, 21, 2, 0).toISOString(), durationMinutes: 60 };
+    const allNight = { start: new Date(2026, 10, 20, 22, 0).toISOString(), durationMinutes: 600 };
+    expect(visibleHourRange([otherDay, allNight], [day])).toEqual({ startHour: 6, endHour: 24 });
   });
 });
 
