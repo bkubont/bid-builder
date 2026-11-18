@@ -18,6 +18,8 @@ type Props = {
   documentType: "estimate" | "invoice";
   documentId: string;
   pdf: PdfOptions;
+  /** Called after the app emailed the document (drafts are now "sent"). */
+  onSent?: () => void;
 };
 
 function defaultMessage(pdf: PdfOptions, companyPhone: string) {
@@ -31,7 +33,7 @@ function defaultMessage(pdf: PdfOptions, companyPhone: string) {
   return `${greeting}\n\n${body}\n\nReply to this email with any questions.\n\n${sign}`;
 }
 
-export function SendDialog({ open, onOpenChange, documentType, documentId, pdf }: Props) {
+export function SendDialog({ open, onOpenChange, documentType, documentId, pdf, onSent }: Props) {
   const { emailEnabled, sendDocument, notify } = useStore();
   const safe = useSafe();
   const label = pdf.kind === "Estimate" ? "Estimate" : pdf.invoiceKind === "deposit" ? "Deposit invoice" : "Invoice";
@@ -52,7 +54,10 @@ export function SendDialog({ open, onOpenChange, documentType, documentId, pdf }
       `Sent to ${to.trim()}`
     );
     setBusy(false);
-    if (ok) onOpenChange(false);
+    if (ok) {
+      onSent?.();
+      onOpenChange(false);
+    }
   }
 
   async function share() {

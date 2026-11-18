@@ -270,11 +270,48 @@ suite("data layer (database)", () => {
     const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
     const e = await data.upsertEstimate(db, companyId, estimateInput(c.id));
     const since = new Date(Date.now() - 60_000);
+    const msg = { sentBy: userId, documentType: "estimate" as const, documentId: e.id, toEmail: "pat@example.com" };
     expect(await data.countEmailsSince(db, companyId, since)).toBe(0);
-    await data.recordEmailSent(db, companyId, { sentBy: userId, documentType: "estimate", documentId: e.id, toEmail: "pat@example.com" });
+    const logId = await data.reserveEmailSlot(db, companyId, msg, 10);
     expect(await data.countEmailsSince(db, companyId, since)).toBe(1);
+    expect((await data.loadSnapshot(db, companyId)).estimates[0].status).toBe("draft"); // not until it's sent
+    await data.confirmEmailSent(db, companyId, logId, { documentType: "estimate", documentId: e.id, providerId: "x" });
     expect((await data.loadSnapshot(db, companyId)).estimates[0].status).toBe("sent");
+    // a failed send gives its slot back
+    const failed = await data.reserveEmailSlot(db, companyId, msg, 10);
+    await data.releaseEmailSlot(db, companyId, failed);
+    expect(await data.countEmailsSince(db, companyId, since)).toBe(1);
     expect(await data.getDocumentForEmail(db, (await makeCompany("b")).companyId, "estimate", e.id)).toBeUndefined();
+  });
+
+  it("never lets parallel sends go over the daily email limit", async () => {
+    const { companyId, userId } = await makeCompany("a");
+    const msg = { sentBy: userId, documentType: "estimate" as const, documentId: "doc", toEmail: "x@example.com" };
+    const results = await Promise.allSettled(Array.from({ length: 8 }, () => data.reserveEmailSlot(db, companyId, msg, 3)));
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(3);
+    expect(results.filter((r) => r.status === "rejected").every((r) => (r as PromiseRejectedResult).reason instanceof data.UserError)).toBe(true);
+  });
+
+  it("won't delete a deposit the final invoice already subtracts", async () => {
+    const { companyId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, companyId, estimateInput(c.id));
+    const { invoice: deposit } = await data.createDepositInvoice(db, companyId, e.id, 50);
+    const { invoice: final } = await data.convertEstimateToInvoice(db, companyId, e.id);
+    await expect(data.deleteInvoice(db, companyId, deposit.id)).rejects.toThrow(new RegExp(final.number));
+    // delete the final first, then the deposit can go
+    await data.deleteInvoice(db, companyId, final.id);
+    await data.deleteInvoice(db, companyId, deposit.id);
+    expect((await data.loadSnapshot(db, companyId)).invoices).toHaveLength(0);
+  });
+
+  it("can delete a deposit before any final invoice exists", async () => {
+    const { companyId } = await makeCompany("a");
+    const c = await data.upsertCustomer(db, companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, companyId, estimateInput(c.id));
+    const { invoice: deposit } = await data.createDepositInvoice(db, companyId, e.id, 50);
+    await data.deleteInvoice(db, companyId, deposit.id);
+    expect((await data.loadSnapshot(db, companyId)).invoices).toHaveLength(0);
   });
 
   it("enforces the daily AI draft limit per company", async () => {

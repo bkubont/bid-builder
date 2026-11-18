@@ -603,7 +603,35 @@ export async function updateInvoice(db: Db, companyId: string, input: InvoiceUpd
 }
 
 export async function deleteInvoice(db: Db, companyId: string, invoiceId: string) {
-  await db.delete(invoices).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId)));
+  await db.transaction(async (t) => {
+    const [target] = await t
+      .select({ kind: invoices.kind, estimateId: invoices.estimateId })
+      .from(invoices)
+      .where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId)))
+      .for("update");
+    if (!target) return;
+    // A deposit already subtracted on the final invoice can't just disappear,
+    // or the final invoice would credit money that was never billed.
+    if (target.kind === "deposit" && target.estimateId) {
+      const [final] = await t
+        .select({ number: invoices.number, depositApplied: invoices.depositApplied })
+        .from(invoices)
+        .where(
+          and(
+            eq(invoices.estimateId, target.estimateId),
+            eq(invoices.companyId, companyId),
+            eq(invoices.kind, "final")
+          )
+        )
+        .limit(1);
+      if (final && Number(final.depositApplied) > 0) {
+        throw new UserError(
+          `This deposit is already subtracted on final invoice ${final.number}. Delete ${final.number} first if the deposit needs to go.`
+        );
+      }
+    }
+    await t.delete(invoices).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId)));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -974,20 +1002,55 @@ export async function countEmailsSince(db: Db, companyId: string, since: Date): 
   return Number(row?.n ?? 0);
 }
 
-/** Record a sent email and mark a draft document as sent. */
-export async function recordEmailSent(
+/**
+ * Reserve one email against the company's 24-hour limit before sending.
+ * The company's settings row is locked while counting, so two sends at the
+ * same moment can't both squeeze under the limit. Returns the log row id;
+ * call confirmEmailSent after sending, or releaseEmailSlot if it failed.
+ */
+export async function reserveEmailSlot(
   db: Db,
   companyId: string,
-  input: {
-    sentBy: string;
-    documentType: "estimate" | "invoice";
-    documentId: string;
-    toEmail: string;
-    providerId?: string;
-  }
+  input: { sentBy: string; documentType: "estimate" | "invoice"; documentId: string; toEmail: string },
+  limit: number
+): Promise<string> {
+  return db.transaction(async (t) => {
+    await t
+      .select({ id: companySettings.companyId })
+      .from(companySettings)
+      .where(eq(companySettings.companyId, companyId))
+      .for("update");
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const [row] = await t
+      .select({ n: sql<number>`count(*)` })
+      .from(emailLog)
+      .where(and(eq(emailLog.companyId, companyId), sql`${emailLog.createdAt} >= ${since}`));
+    if (Number(row?.n ?? 0) >= limit) {
+      throw new UserError("Today's email limit is reached. Use Share, or try again tomorrow.");
+    }
+    const id = newId();
+    await t.insert(emailLog).values({ id, companyId, ...input, providerId: null, createdAt: new Date() });
+    return id;
+  });
+}
+
+/** The send failed: give the slot back. */
+export async function releaseEmailSlot(db: Db, companyId: string, logId: string) {
+  await db.delete(emailLog).where(and(eq(emailLog.id, logId), eq(emailLog.companyId, companyId)));
+}
+
+/** The email went out: note the provider's id and mark a draft document as sent. */
+export async function confirmEmailSent(
+  db: Db,
+  companyId: string,
+  logId: string,
+  input: { documentType: "estimate" | "invoice"; documentId: string; providerId?: string }
 ) {
   const now = new Date();
-  await db.insert(emailLog).values({ id: newId(), companyId, ...input, providerId: input.providerId ?? null, createdAt: now });
+  await db
+    .update(emailLog)
+    .set({ providerId: input.providerId ?? null })
+    .where(and(eq(emailLog.id, logId), eq(emailLog.companyId, companyId)));
   if (input.documentType === "estimate") {
     await db
       .update(estimates)

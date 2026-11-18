@@ -145,12 +145,15 @@ export async function sendDocumentAction(input: unknown) {
     const db = getDb();
     const doc = await data.getDocumentForEmail(db, me.companyId, msg.documentType, msg.documentId);
     if (!doc) throw new UserError("That document was deleted on another device.");
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    if ((await data.countEmailsSince(db, me.companyId, since)) >= EMAILS_PER_DAY) {
-      throw new UserError("Today's email limit is reached. Use Share, or try again tomorrow.");
-    }
     if (!msg.pdfBase64.startsWith("JVBER")) throw new UserError("That attachment isn't a PDF.");
     const snapshot = await data.loadSnapshot(db, me.companyId);
+    // Take a slot under the daily limit first, so parallel sends can't exceed it.
+    const logId = await data.reserveEmailSlot(
+      db,
+      me.companyId,
+      { sentBy: me.id, documentType: msg.documentType, documentId: msg.documentId, toEmail: msg.to },
+      EMAILS_PER_DAY
+    );
     let sent: { id?: string };
     try {
       sent = await sendEmail({
@@ -162,13 +165,12 @@ export async function sendDocumentAction(input: unknown) {
         attachment: { filename: `${doc.number}.pdf`, base64: msg.pdfBase64 },
       });
     } catch {
+      await data.releaseEmailSlot(db, me.companyId, logId);
       throw new UserError("The email couldn't be sent. Check the address and try again, or use Share.");
     }
-    await data.recordEmailSent(db, me.companyId, {
-      sentBy: me.id,
+    await data.confirmEmailSent(db, me.companyId, logId, {
       documentType: msg.documentType,
       documentId: msg.documentId,
-      toEmail: msg.to,
       providerId: sent.id,
     });
     return null;

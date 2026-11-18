@@ -108,7 +108,9 @@ export function EstimateBuilder({
   }, [lineItems, taxPercent, taxable]);
 
   // Warn before leaving the page (reload, close tab) with unsaved changes.
-  const formSnapshot = JSON.stringify([customerId, jobTitle, jobAddress, trade, status, taxPercent, notes, validUntil, lineItems.filter(hasContent), sections]);
+  const snapshotWith = (st: EstimateStatus) =>
+    JSON.stringify([customerId, jobTitle, jobAddress, trade, st, taxPercent, notes, validUntil, lineItems.filter(hasContent), sections]);
+  const formSnapshot = snapshotWith(status);
   const [initialSnapshot] = useState(formSnapshot);
   const dirty = formSnapshot !== (savedSnapshot ?? initialSnapshot);
   useEffect(() => {
@@ -839,6 +841,14 @@ export function EstimateBuilder({
           documentType="estimate"
           documentId={existing.id}
           pdf={sendPdf}
+          onSent={() => {
+            // The server marked a draft as sent; keep the form in step so the
+            // next Save doesn't write "draft" back.
+            if (status === "draft") {
+              setStatus("sent");
+              setSavedSnapshot(snapshotWith("sent"));
+            }
+          }}
         />
       ) : null}
 
