@@ -128,6 +128,7 @@ const toBlock = (r: BlockRow): ScheduleBlock => ({
   title: r.title,
   start: r.start.toISOString(),
   durationMinutes: r.durationMinutes,
+  assignedUserId: r.assignedUserId ?? null,
 });
 
 // ---------------------------------------------------------------------------
@@ -136,7 +137,7 @@ const toBlock = (r: BlockRow): ScheduleBlock => ({
 
 /** Everything the app shows for one company. Small businesses: one round trip. */
 export async function loadSnapshot(db: Db, companyId: string): Promise<AppData> {
-  const [company, settings, cust, pb, est, inv, blocks] = await Promise.all([
+  const [company, settings, cust, pb, est, inv, blocks, team] = await Promise.all([
     db.select().from(companies).where(eq(companies.id, companyId)).limit(1),
     db.select().from(companySettings).where(eq(companySettings.companyId, companyId)).limit(1),
     db.select().from(customers).where(eq(customers.companyId, companyId)).orderBy(asc(customers.name)),
@@ -148,6 +149,12 @@ export async function loadSnapshot(db: Db, companyId: string): Promise<AppData> 
     db.select().from(estimates).where(eq(estimates.companyId, companyId)).orderBy(desc(estimates.updatedAt)),
     db.select().from(invoices).where(eq(invoices.companyId, companyId)).orderBy(desc(invoices.createdAt)),
     db.select().from(scheduleBlocks).where(eq(scheduleBlocks.companyId, companyId)).orderBy(asc(scheduleBlocks.start)),
+    db
+      .select({ id: user.id, name: user.name, role: memberships.role })
+      .from(memberships)
+      .innerJoin(user, eq(user.id, memberships.userId))
+      .where(eq(memberships.companyId, companyId))
+      .orderBy(asc(memberships.createdAt)),
   ]);
   if (!company[0] || !settings[0]) throw new Error(`Company ${companyId} is missing settings`);
   const s = settings[0];
@@ -169,6 +176,7 @@ export async function loadSnapshot(db: Db, companyId: string): Promise<AppData> 
     estimates: est.map(toEstimate),
     invoices: inv.map(toInvoice),
     scheduleBlocks: blocks.map(toBlock),
+    team,
     counters: { estimate: s.estimateCounter, invoice: s.invoiceCounter },
   };
 }
@@ -638,6 +646,18 @@ export async function deleteInvoice(db: Db, companyId: string, invoiceId: string
 // Schedule
 // ---------------------------------------------------------------------------
 
+/** The assignee must be on this company's team (or null for unassigned). */
+async function checkAssignee(db: Exec, companyId: string, userId: string | null | undefined) {
+  if (!userId) return null;
+  const [row] = await db
+    .select({ userId: memberships.userId })
+    .from(memberships)
+    .where(and(eq(memberships.companyId, companyId), eq(memberships.userId, userId)))
+    .limit(1);
+  if (!row) throw new UserError("That person isn't on your team anymore.");
+  return userId;
+}
+
 export async function upsertScheduleBlock(
   db: Db,
   companyId: string,
@@ -652,6 +672,7 @@ export async function upsertScheduleBlock(
     title: input.title,
     start: new Date(input.start),
     durationMinutes: input.durationMinutes,
+    assignedUserId: await checkAssignee(db, companyId, input.assignedUserId),
     updatedAt: now,
   };
   if (input.id) {
@@ -666,11 +687,25 @@ export async function upsertScheduleBlock(
   return toBlock(row);
 }
 
-export async function moveScheduleBlock(db: Db, companyId: string, blockId: string, start: string) {
+/** Move, resize, retitle or reassign a block. Only the fields given change. */
+export async function updateScheduleBlock(
+  db: Db,
+  companyId: string,
+  blockId: string,
+  patch: { start?: string; durationMinutes?: number; assignedUserId?: string | null; title?: string }
+): Promise<ScheduleBlock> {
   const where = and(eq(scheduleBlocks.id, blockId), eq(scheduleBlocks.companyId, companyId));
-  const [existing] = await db.select({ id: scheduleBlocks.id }).from(scheduleBlocks).where(where).limit(1);
+  const [existing] = await db.select().from(scheduleBlocks).where(where).limit(1);
   if (!existing) throw new UserError("That timeblock was removed on another device.");
-  await db.update(scheduleBlocks).set({ start: new Date(start), updatedAt: new Date() }).where(where);
+  const values: Partial<BlockRow> = { updatedAt: new Date() };
+  if (patch.start !== undefined) values.start = new Date(patch.start);
+  if (patch.durationMinutes !== undefined) values.durationMinutes = patch.durationMinutes;
+  if (patch.title !== undefined) values.title = patch.title;
+  if (patch.assignedUserId !== undefined) {
+    values.assignedUserId = await checkAssignee(db, companyId, patch.assignedUserId);
+  }
+  await db.update(scheduleBlocks).set(values).where(where);
+  return toBlock({ ...existing, ...values });
 }
 
 export async function deleteScheduleBlock(db: Db, companyId: string, blockId: string) {
@@ -786,8 +821,15 @@ export async function replaceWithTestData(db: Db, companyId: string) {
         updatedAt: now,
       }))
     );
+    // Spread the test schedule across the team, team members first.
+    const people = await tx
+      .select({ id: memberships.userId, role: memberships.role })
+      .from(memberships)
+      .where(eq(memberships.companyId, companyId))
+      .orderBy(asc(memberships.createdAt));
+    const crew = [...people.filter((p) => p.role === "member"), ...people.filter((p) => p.role === "owner")];
     await tx.insert(scheduleBlocks).values(
-      seed.scheduleBlocks.map((b) => ({
+      seed.scheduleBlocks.map((b, i) => ({
         id: remap(b.id),
         companyId,
         estimateId: remap(b.estimateId),
@@ -795,6 +837,8 @@ export async function replaceWithTestData(db: Db, companyId: string) {
         title: b.title,
         start: new Date(b.start),
         durationMinutes: b.durationMinutes,
+        // Deck days go to the first person; the rest alternate.
+        assignedUserId: crew.length ? crew[(b.estimateId === "est-2" ? 0 : i) % crew.length].id : null,
         createdAt: now,
         updatedAt: now,
       }))
@@ -950,7 +994,14 @@ export async function removeMember(db: Db, companyId: string, userId: string) {
   if (target.role === "owner" && members.filter((m) => m.role === "owner").length <= 1) {
     throw new UserError("You can't remove the last Owner.");
   }
-  await db.delete(memberships).where(and(eq(memberships.companyId, companyId), eq(memberships.userId, userId)));
+  await db.transaction(async (t) => {
+    await t.delete(memberships).where(and(eq(memberships.companyId, companyId), eq(memberships.userId, userId)));
+    // Their scheduled work goes back to unassigned, so it isn't lost from view.
+    await t
+      .update(scheduleBlocks)
+      .set({ assignedUserId: null, updatedAt: new Date() })
+      .where(and(eq(scheduleBlocks.companyId, companyId), eq(scheduleBlocks.assignedUserId, userId)));
+  });
 }
 
 // ---------------------------------------------------------------------------

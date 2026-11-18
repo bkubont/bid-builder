@@ -314,6 +314,52 @@ suite("data layer (database)", () => {
     expect((await data.loadSnapshot(db, companyId)).invoices).toHaveLength(0);
   });
 
+  it("assigns blocks only to people on the same team, and unassigns people who leave", async () => {
+    const a = await makeCompany("a");
+    const b = await makeCompany("b");
+    const c = await data.upsertCustomer(db, a.companyId, { name: "Pat", email: "", phone: "", address: "", notes: "" });
+    const e = await data.upsertEstimate(db, a.companyId, estimateInput(c.id));
+    const start = new Date("2026-11-20T13:00:00.000Z").toISOString();
+
+    // a team member for company A
+    const { token } = await data.createInvite(db, a.companyId, { email: "crew@example.com", role: "member", createdBy: a.userId });
+    const inv = (await data.findOpenInvite(db, token))!;
+    const crewId = crypto.randomUUID();
+    const now = new Date();
+    await db.insert(user).values({ id: crewId, name: "Crew", email: "crew@example.com", emailVerified: false, createdAt: now, updatedAt: now });
+    await data.acceptInvite(db, inv.id, a.companyId, crewId, "member");
+
+    const block = await data.upsertScheduleBlock(db, a.companyId, { estimateId: e.id, title: "Day 1", start, durationMinutes: 240, assignedUserId: crewId });
+    expect(block.assignedUserId).toBe(crewId);
+    // someone from another company can't be assigned
+    await expect(data.updateScheduleBlock(db, a.companyId, block.id, { assignedUserId: b.userId })).rejects.toThrow(/team/);
+    await expect(data.upsertScheduleBlock(db, a.companyId, { estimateId: e.id, title: "x", start, durationMinutes: 60, assignedUserId: b.userId })).rejects.toThrow(data.UserError);
+    // company B can't touch A's block
+    await expect(data.updateScheduleBlock(db, b.companyId, block.id, { durationMinutes: 30 })).rejects.toThrow(data.UserError);
+
+    // resize + move + reassign in one go, only given fields change
+    const moved = await data.updateScheduleBlock(db, a.companyId, block.id, { durationMinutes: 300, assignedUserId: a.userId });
+    expect(moved).toMatchObject({ durationMinutes: 300, assignedUserId: a.userId, start, title: "Day 1" });
+
+    // the team shows up in the snapshot for scheduling
+    const snap = await data.loadSnapshot(db, a.companyId);
+    expect(snap.team.map((t) => [t.name, t.role])).toEqual([["a", "owner"], ["Crew", "member"]]);
+
+    // removing a member puts their blocks back to unassigned
+    await data.updateScheduleBlock(db, a.companyId, block.id, { assignedUserId: crewId });
+    await data.removeMember(db, a.companyId, crewId);
+    const after = await data.loadSnapshot(db, a.companyId);
+    expect(after.scheduleBlocks[0].assignedUserId).toBeNull();
+    expect(after.team).toHaveLength(1);
+  });
+
+  it("test data spreads the schedule across the team", async () => {
+    const { companyId } = await makeCompany("a");
+    await data.replaceWithTestData(db, companyId);
+    const snap = await data.loadSnapshot(db, companyId);
+    expect(snap.scheduleBlocks.every((b) => b.assignedUserId === snap.team[0].id)).toBe(true);
+  });
+
   it("enforces the daily AI draft limit per company", async () => {
     const a = await makeCompany("a");
     const b = await makeCompany("b");

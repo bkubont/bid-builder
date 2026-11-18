@@ -125,6 +125,15 @@ export interface ScheduleBlock {
   title: string;
   start: string;
   durationMinutes: number;
+  /** Team member doing this block; null/undefined = unassigned. */
+  assignedUserId?: string | null;
+}
+
+/** Someone on the company's team, as shown for scheduling. */
+export interface TeamMember {
+  id: string;
+  name: string;
+  role: "owner" | "member";
 }
 
 export interface AppData {
@@ -134,6 +143,7 @@ export interface AppData {
   estimates: Estimate[];
   invoices: Invoice[];
   scheduleBlocks: ScheduleBlock[];
+  team: TeamMember[];
   counters: {
     estimate: number;
     invoice: number;

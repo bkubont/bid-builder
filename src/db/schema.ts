@@ -297,10 +297,15 @@ export const scheduleBlocks = mysqlTable(
     title: varchar("title", { length: 255 }).notNull(),
     start: datetime("start", { mode: "date", fsp: 3 }).notNull(),
     durationMinutes: int("duration_minutes").notNull(),
+    /** Who's doing this block; null = unassigned. */
+    assignedUserId: id("assigned_user_id").references(() => user.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index("block_company_start_idx").on(t.companyId, t.start)]
+  (t) => [
+    index("block_company_start_idx").on(t.companyId, t.start),
+    index("block_assignee_idx").on(t.assignedUserId),
+  ]
 );
 
 /** Per-company daily count of AI drafts, for the usage limit. */

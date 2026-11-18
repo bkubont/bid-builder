@@ -24,6 +24,7 @@ import {
   inviteSchema,
   invoiceUpdateSchema,
   pricebookItemSchema,
+  scheduleBlockPatchSchema,
   scheduleBlockSchema,
   sendDocumentSchema,
 } from "./validation";
@@ -199,16 +200,11 @@ export async function upsertScheduleBlockAction(input: unknown) {
   });
 }
 
-export async function moveScheduleBlockAction(id: unknown, start: unknown) {
+/** Move, resize, retitle or reassign a block. */
+export async function updateScheduleBlockAction(id: unknown, patch: unknown) {
   return run(async () => {
     const me = await requireMe();
-    await data.moveScheduleBlock(
-      getDb(),
-      me.companyId,
-      idSchema.parse(id),
-      z.iso.datetime({ offset: true }).parse(start)
-    );
-    return null;
+    return data.updateScheduleBlock(getDb(), me.companyId, idSchema.parse(id), scheduleBlockPatchSchema.parse(patch));
   });
 }
 
