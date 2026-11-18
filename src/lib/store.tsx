@@ -300,28 +300,34 @@ function useStoreValue(initialData: AppData, loadedAt: number, me: MeInfo, email
       },
 
       /** Moves show immediately; undone if the server refuses. */
-      async moveScheduleBlock(id: string, start: string) {
-        let previous: string | undefined;
+      /**
+       * Move, resize or reassign a block. Shows immediately; undone if the
+       * server refuses.
+       */
+      async updateScheduleBlock(
+        id: string,
+        patch: { start?: string; durationMinutes?: number; assignedUserId?: string | null; title?: string }
+      ) {
+        let previous: ScheduleBlock | undefined;
         setData((d) => ({
           ...d,
           scheduleBlocks: d.scheduleBlocks.map((b) => {
             if (b.id !== id) return b;
-            previous = b.start;
-            return { ...b, start };
+            previous = b;
+            return { ...b, ...patch };
           }),
         }));
         try {
-          await mutate(() => actions.moveScheduleBlockAction(id, start));
+          const saved = await mutate(() => actions.updateScheduleBlockAction(id, patch));
+          setData((d) => ({ ...d, scheduleBlocks: upsertById(d.scheduleBlocks, saved) }));
+          return saved;
         } catch (error) {
           setData((d) => ({
             ...d,
-            scheduleBlocks: d.scheduleBlocks.map((b) =>
-              b.id === id && previous ? { ...b, start: previous } : b
-            ),
+            scheduleBlocks: d.scheduleBlocks.map((b) => (b.id === id && previous ? previous : b)),
           }));
           throw error;
         }
-        return true as const;
       },
 
       async deleteScheduleBlock(id: string) {

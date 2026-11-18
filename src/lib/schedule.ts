@@ -99,3 +99,48 @@ export function scheduledLineIds(
   }
   return ids;
 }
+
+export type Placed<T> = { item: T; lane: number; lanes: number };
+
+/**
+ * Side-by-side layout for one day: blocks that overlap in time share the
+ * width (two people on two jobs at 9am sit next to each other).
+ */
+export function layoutLanes<T extends { start: string; durationMinutes: number }>(items: T[]): Placed<T>[] {
+  const sorted = [...items].sort((a, b) => +new Date(a.start) - +new Date(b.start));
+  const out: Placed<T>[] = [];
+  let cluster: Placed<T>[] = [];
+  let clusterEnd = -Infinity;
+  let laneEnds: number[] = [];
+  const flush = () => {
+    const lanes = Math.max(1, laneEnds.length);
+    cluster.forEach((p) => out.push({ ...p, lanes }));
+    cluster = [];
+    laneEnds = [];
+  };
+  for (const item of sorted) {
+    const start = +new Date(item.start);
+    const end = start + item.durationMinutes * 60000;
+    if (start >= clusterEnd) {
+      flush();
+      clusterEnd = -Infinity;
+    }
+    let lane = laneEnds.findIndex((laneEnd) => laneEnd <= start);
+    if (lane === -1) {
+      lane = laneEnds.length;
+      laneEnds.push(end);
+    } else {
+      laneEnds[lane] = end;
+    }
+    cluster.push({ item, lane, lanes: 0 });
+    clusterEnd = Math.max(clusterEnd, end);
+  }
+  flush();
+  return out;
+}
+
+/** Duration after dragging a block's bottom edge by `pixels`, snapped to 15 minutes. */
+export function resizedMinutes(startMinutes: number, pixels: number, hourHeight: number, maxMinutes = 24 * 60): number {
+  const deltaQuarters = Math.round(pixels / (hourHeight / 4));
+  return Math.min(maxMinutes, Math.max(15, startMinutes + deltaQuarters * 15));
+}

@@ -655,6 +655,7 @@ export function createSeedData(now: Date = new Date()): AppData {
     estimates,
     invoices,
     scheduleBlocks,
+    team: [],
     counters: { estimate: 1009, invoice: 2004 },
   };
 }

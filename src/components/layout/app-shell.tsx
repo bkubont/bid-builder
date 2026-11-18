@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   BookOpen,
+  CalendarCheck,
   CalendarDays,
   FileText,
   LayoutDashboard,
@@ -23,10 +24,11 @@ import { OFFLINE_MESSAGE, useStore } from "@/lib/store";
 
 const NAV = [
   { href: "/", label: "Home", icon: LayoutDashboard },
+  { href: "/today", label: "Today", icon: CalendarCheck },
   { href: "/estimates", label: "Estimates", icon: FileText },
   { href: "/schedule", label: "Schedule", icon: CalendarDays },
-  { href: "/customers", label: "Customers", icon: Users },
   { href: "/invoices", label: "Invoices", icon: Receipt },
+  { href: "/customers", label: "Customers", icon: Users },
   { href: "/pricebook", label: "Pricebook", icon: BookOpen },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

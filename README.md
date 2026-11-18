@@ -12,7 +12,8 @@ Live target: `https://estimate.fandg-llc.com`
 - **Send** estimates and invoices: Share to Mail/Messages from a tablet or phone, or email straight from the app once Resend is set up
 - **Pricebook** for reusable rates (powers manual adds and drafts)
 - **AI / quick draft** from a job description (`OPENAI_API_KEY` optional; local pricebook matching otherwise). Asks before replacing lines you've entered. Limited per company per day.
-- **Schedule** — week timeblocks; drag whole jobs or individual lines; duration matches labor hours
+- **Schedule** — week or day view (day on phones); drag whole jobs or individual lines; duration matches labor hours. Assign blocks to people, filter by person, tap a block to change its time/length/assignee, drag its bottom edge to resize
+- **Today** — each person's jobs for the day on the phone: times, tap-to-navigate address, tap-to-call, the work to do and notes; viewable offline once opened
 - **Customers**, and invoices converted from an estimate (at most one deposit and one final invoice per estimate)
 - **Logins and team** — email + password; Owners manage company settings and invite people
 - **PWA** manifest + service worker for home-screen install; pages you've opened stay viewable offline
