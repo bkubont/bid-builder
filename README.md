@@ -1,41 +1,65 @@
-# Canopy Estimate
+# Bid Builder
 
-A simple, offline-friendly estimate, calendar, and jobs app for arborists and tree-care companies (tuned for northern Michigan work). Light workspace UI with a desktop sidebar and mobile bottom nav, field estimates with on-screen signatures, an interactive calendar, and a Jobs list/Kanban for approved work.
+Tablet-first contractor estimate app for **Square This Up / F&G** — pricebook + optional AI draft, customers, estimates, convert-to-invoice, and a drag-and-drop **timeblock schedule**. Works on phones and desktop too, and installs as a Progressive Web App.
 
-## Use it
+Live target: `https://estimate.fandg-llc.com`
 
-Open `index.html` in any modern browser; there's no build step. Hosted over HTTPS, it becomes an installable app with a home-screen icon that works offline. See [DEPLOY.md](DEPLOY.md) for Hostinger setup, and `brand.js` to rebrand it.
+## Features
 
-## How it works
+- **Estimates** with materials/labor lines grouped into sections, markup, tax, PDF export. Customer estimates show each section's name and total only.
+- **Invoices** show every line under section headings; **deposit invoices** bill a share up front and the final invoice subtracts it
+- **Sales tax by category** (e.g. materials only), kept per document so changing the setting never changes what you've sent
+- **Send** estimates and invoices: Share to Mail/Messages from a tablet or phone, or email straight from the app once Resend is set up
+- **Pricebook** for reusable rates (powers manual adds and drafts)
+- **AI / quick draft** from a job description (`OPENAI_API_KEY` optional; local pricebook matching otherwise). Asks before replacing lines you've entered. Limited per company per day.
+- **Schedule** — week or day view (day on phones); drag whole jobs or individual lines; duration matches labor hours. Assign blocks to people, filter by person, tap a block to change its time/length/assignee, drag its bottom edge to resize
+- **Today** — each person's jobs for the day on the phone: times, tap-to-navigate address, tap-to-call, the work to do and notes; viewable offline once opened
+- **Customers**, and invoices converted from an estimate (at most one deposit and one final invoice per estimate)
+- **Logins and team** — email + password; Owners manage company settings and invite people
+- **PWA** manifest + service worker for home-screen install; pages you've opened stay viewable offline
+- Branding from Square This Up (blue `#0504AA` + gold `#E3AD36`)
 
-Pricing is **days × day rate** plus equipment rentals (Smith cost rates with a **20% markup**). Wood & debris choices are operational only (not priced). Tree size is trunk diameter (DBH).
+Data lives in a MySQL/MariaDB database, and each company's data is kept separate. Owners manage the team and company settings; team members work on customers, estimates, invoices and the schedule. Saving needs a connection.
 
-1. **Company profile:** company name, license, address, phone, email, logo, day rate (default $2,000), tax, deposit, validity period, and your contractor signature. Incomplete setup shows a banner with a Finish company profile action but does **not** block Calendar, Estimates, or Jobs. Name and phone are required to save. After setup, the app lands on **Calendar**.
-2. **New estimate**, with big Back / Next buttons. On a phone it’s one section per screen; on a tablet related sections are combined:
-   - **Client** *(tablet: Job = Client + Site):* first/last name, company, state (MI) + ZIP, contacts / `.vcf` / past client, plus **Town** for the schedule
-   - **Trees:** northern MI species in hardwood/softwood groups, work, DBH size, condition
-   - **Site:** site conditions, **Parking**, **Wood & debris** (leave all / leave wood / haul all / cut and stack / hide it), notes
-   - **Job days** *(tablet: Pricing):* ½ / 1 / 1½ / 2… days × day rate (work dates set later on calendar/Jobs)
-   - **Equipment:** Smith Equipment cost defaults; rental days auto-match job days; **20% markup** on rental totals
-   - **Summary** *(tablet: Review):* labor, equipment, tax, **Other costs**, total, terms, **Add signature**
-   - **Sign:** client signature sets status to Approved; contractor sig from profile
-   - **Approved:** full estimate PDF once signed; **Add** opens a signed change order (extra days, reason, optional trees)
-   - **Send** (pending): print/PDF, share, text, email; **Add signature** opens a signature pad when the customer isn’t present
-3. **Estimates list** (☰): search, reopen, status badges (**Pending** unsigned / **Approved** signed / **Scheduled** on calendar / In Progress / Blocked / Done).
-4. **Calendar** (landing / ☰): Month, Week, Day, and Agenda views (phone defaults to Agenda). Create and edit events (estimate visit, tree work, rentals, etc.) in America/Detroit time. Linking a signed estimate to a tree-work event marks it **Scheduled**. Tree work on an unsigned estimate requires an override.
-5. **Jobs board** (☰): List or Kanban of the estimate pipeline — client name, phone, town, days, equipment. Pick a work date on a signed estimate → **Scheduled**. Move to In Progress, Blocked (with reason chips), or Done.
+Customer documents (PDFs, invoices) show a price per unit with markup already included. Your cost and markup only appear on the estimate editing screen.
 
-Pick lists live at the top of `app.js`.
+## Run locally
 
-## Where data lives
+You need Node.js 20.9+ and a MySQL or MariaDB database.
 
-Everything is stored in the browser's `localStorage` on this device only — there is no cloud sync. Use **Back up data** regularly (profile, estimates, and calendar events when present). Restore can merge or replace; replace snapshots current data on the device first. Legacy estimates migrate automatically (status from signature, ignore old crew, map old height sizes when possible, split town from City/State/ZIP).
+```bash
+npm install
+cp .env.example .env.local   # fill in DATABASE_URL; BETTER_AUTH_SECRET can stay empty locally
+npm run db:migrate           # create the tables
+npm run db:seed              # test company + logins (see below)
+npm run dev
+```
 
-## Files
+Open [http://127.0.0.1:3847](http://127.0.0.1:3847). The seed creates `owner@example.com` (Owner) and `field@example.com` (team member), both with password `change-me-please`.
 
-- `index.html`: the app shell
-- `styles.css`: screen and print styles
-- `app.js`: form, calendar/events, jobs/kanban, saving, signatures, printing
-- `brand.js`, `brand/`, `manifest.webmanifest`: branding and app icons
-- `sw.js`: offline support (bump `VERSION` when deploying)
-- `.htaccess`: Hostinger settings (HTTPS redirect, caching)
+## Deploy (Hostinger Git deploy)
+
+1. **Database:** hPanel → Databases → MySQL Databases → create a database and a user.
+2. **Environment variables** (Node.js app settings), described in `.env.example`:
+   `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `OWNER_EMAIL`, `SETUP_CODE`, and optionally `OPENAI_API_KEY`, `RESEND_API_KEY` + `EMAIL_FROM`.
+3. **Node.js 20.9 or newer.** Build command `npm run build`, start command `npm start`.
+   `npm start` applies any new database migrations, then serves the app on the `PORT` Hostinger provides.
+4. **First visit:** the site opens `/setup`. Enter the setup code, your name, company name and a password. That creates the Owner account, and `/setup` locks itself.
+5. **Invite your team** from Settings → Team. Each invite link works once and expires after 7 days.
+6. **Test data:** Settings → Test data fills the account with fictional customers, estimates and so on.
+
+## Checks
+
+```bash
+npm run typecheck   # TypeScript
+npm run lint        # ESLint
+npm test            # money math, dates, draft logic
+npm run test:db     # + database tests (needs a test database; it gets wiped)
+npm run build       # production build (needs no database)
+```
+
+`npm run test:db` uses `TEST_DATABASE_URL`, defaulting to `mysql://bid:localdev@127.0.0.1:3306/bidbuilder_test`.
+
+## Changing the database
+
+Edit `src/db/schema.ts`, run `npm run db:generate` to write a migration into `drizzle/`, and commit it. Migrations run automatically on `npm start`.
