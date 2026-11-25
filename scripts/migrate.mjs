@@ -1,5 +1,9 @@
 // Applies pending database migrations (drizzle/*.sql). Safe to run on every
 // start: already-applied migrations are skipped.
+//
+// Hostinger's Node.js Next deploy starts the standalone server directly and
+// never runs `npm start`, so migrations also run at the end of `npm run build`
+// when DATABASE_URL is present (see --if-database-url).
 import { drizzle } from "drizzle-orm/mysql2";
 import { migrate } from "drizzle-orm/mysql2/migrator";
 import mysql from "mysql2/promise";
@@ -9,8 +13,13 @@ import nextEnv from "@next/env";
 // Read .env / .env.local like Next.js does (hosting env vars still win).
 nextEnv.loadEnvConfig(fileURLToPath(new URL("..", import.meta.url)));
 
+const optional = process.argv.includes("--if-database-url");
 const url = process.env.DATABASE_URL;
 if (!url) {
+  if (optional) {
+    console.log("DATABASE_URL is not set; skipping migrations.");
+    process.exit(0);
+  }
   console.error("DATABASE_URL is not set; cannot run migrations.");
   process.exit(1);
 }
@@ -23,6 +32,9 @@ try {
   console.log("Database is up to date.");
 } catch (error) {
   console.error("Database migration failed:", error);
+  if (error && typeof error === "object" && "cause" in error && error.cause) {
+    console.error("Cause:", error.cause);
+  }
   process.exitCode = 1;
 } finally {
   await connection.end();
