@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack --hostname 127.0.0.1 --port 3847",
-    "build": "next build --webpack",
+    "build": "next build --webpack && node scripts/migrate.mjs --if-database-url",
     "start": "node scripts/migrate.mjs && next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

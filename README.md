@@ -43,7 +43,11 @@ Open [http://127.0.0.1:3847](http://127.0.0.1:3847). The seed creates `owner@exa
 2. **Environment variables** (Node.js app settings), described in `.env.example`:
    `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `OWNER_EMAIL`, `SETUP_CODE`, and optionally `OPENAI_API_KEY`, `RESEND_API_KEY` + `EMAIL_FROM`.
 3. **Node.js 20.9 or newer.** Build command `npm run build`, start command `npm start`.
-   `npm start` applies any new database migrations, then serves the app on the `PORT` Hostinger provides.
+   Hostinger's Next.js deploy runs the standalone server itself (it does **not** call
+   `npm start`), so `npm run build` applies pending database migrations when
+   `DATABASE_URL` is set in the Node.js environment. Locally, `npm start` still
+   migrates then serves. For the app process, use MySQL host `127.0.0.1` (not the
+   `srv….hstgr.io` hostname from hPanel).
 4. **First visit:** the site opens `/setup`. Enter the setup code, your name, company name and a password. That creates the Owner account, and `/setup` locks itself.
 5. **Invite your team** from Settings → Team. Each invite link works once and expires after 7 days.
 6. **Test data:** Settings → Test data fills the account with fictional customers, estimates and so on.
@@ -55,7 +59,7 @@ npm run typecheck   # TypeScript
 npm run lint        # ESLint
 npm test            # money math, dates, draft logic
 npm run test:db     # + database tests (needs a test database; it gets wiped)
-npm run build       # production build (needs no database)
+npm run build       # production build (migrates only if DATABASE_URL is set)
 ```
 
 `npm run test:db` uses `TEST_DATABASE_URL`, defaulting to `mysql://bid:localdev@127.0.0.1:3306/bidbuilder_test`.
